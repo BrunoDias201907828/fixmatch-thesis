@@ -1,156 +1,111 @@
-import torch
-from torch.utils.data import DataLoader, Dataset
-from imagenet_dataloader import imagenet_get_dataset
-import mlflow
-from torchmetrics import Accuracy
-import torchvision
+import argparse
+parser = argparse.ArgumentParser()
+parser.add_argument('output')
+parser.add_argument('method')
+parser.add_argument('--num-labeled', type=int, default=1000)
+parser.add_argument('--lmbda', type=float, default=1)
+parser.add_argument('--epochs', type=int, default=300)
+parser.add_argument('--sup-batchsize', type=int, default=16)
+parser.add_argument('--unsup-batchsize', type=int, default=112)
+args = parser.parse_args()
 
-class TrainPipeline:
-    def __init__(
-        self,
-        run_name: str,
-        labeled_dataset: Dataset,
-        unlabeled_dataset: Dataset,
-        val_dataset: Dataset,
-        model, device,
-        n_classes: int,
-        batch_size_labeled: int,
-        batch_size_unlabeled: int,
-        n_epochs: int,
-        tau: float,
-        lambda_u: float
-    ):
-        self._run_name = run_name
-        self._labeled_dataset = labeled_dataset
-        self._unlabeled_dataset = unlabeled_dataset
-        self._val_dataset = val_dataset
-        self._model = model
-        self._device = device
-        self._n_classes = n_classes
-        self._batch_size_labeled = batch_size_labeled
-        self._batch_size_unlabeled = batch_size_unlabeled
-        self._n_epochs = n_epochs
-        self._tau = tau
-        self._lambda_u = lambda_u
-        self._labeled_dataloader = DataLoader(self._labeled_dataset, batch_size=self._batch_size_labeled, shuffle=True)
-        self._unlabeled_dataloader = DataLoader(self._unlabeled_dataset, batch_size=self._batch_size_unlabeled, shuffle=True)
-        self._val_dataloader = DataLoader(self._val_dataset, batch_size=100, shuffle=False)
-        self._optimizer = torch.optim.Adam(model.parameters(), lr=0.0001)
+import torchvision, torch
+from torchvision.transforms import v2
+from torcheval import metrics
+from itertools import cycle
+from time import time
+from semisup import semisup
+import models
+device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
-        self._losses = {
-            'train_loss': 0,
-            'val_loss': 0
-        }
-        self._metrics = {'val_accuracy': Accuracy(task="multiclass", num_classes=self._n_classes).to(self._device)}
+############################################## DATA ##############################################
 
+transforms = v2.Compose([
+    v2.ToImage(),
+    v2.ToDtype(torch.float32, True),
+    v2.Normalize((0.49139968, 0.48215827, 0.44653124), (0.24703233, 0.24348505, 0.26158768))
+])
+num_classes = 10
+train_dataset = torchvision.datasets.CIFAR10('/data/toys', True, transforms)
+val_dataset = torchvision.datasets.CIFAR10('/data/toys', False, transforms)
+val_dataloader = torch.utils.data.DataLoader(val_dataset, args.sup_batchsize+args.unsup_batchsize,
+    pin_memory=True, num_workers=4)
 
+# split labeled / unlabeled
+SEED = 123
+generator = torch.Generator().manual_seed(SEED)
+train_sup_dataset, train_unsup_dataset = torch.utils.data.random_split(train_dataset, [args.num_labeled, len(train_dataset) - args.num_labeled], generator)
+marginal_distribution = torch.bincount(torch.tensor([y for _, y in train_sup_dataset]), minlength=num_classes).to(device) / len(train_sup_dataset)
+train_sup_dataloader = torch.utils.data.DataLoader(train_sup_dataset, args.sup_batchsize, True, num_workers=4, pin_memory=True)
+train_unsup_dataloader = torch.utils.data.DataLoader(train_unsup_dataset, args.unsup_batchsize, True, num_workers=4, pin_memory=True)
 
-    def _compute_unlabeled_loss(self, weak_preds, strong_preds):
-        """
-        Computes the unlabeled loss
-        """
-        pseudo_labels = weak_preds.argmax(dim=1)
-        confidence = weak_preds.max(dim=1)[0]
+############################################## MODEL ##############################################
 
-        mask = confidence >= self._tau
-        num_selected = mask.sum().item()
+model = models.WideResNet()
+model.to(device)
 
-        if num_selected > 0:
-            strong_preds = strong_preds[mask]
-            pseudo_labels = pseudo_labels[mask]
+############################################## METHODS ##############################################
 
-            loss_unlabeled = torch.nn.CrossEntropyLoss()(strong_preds, pseudo_labels)
-        else:
-            loss_unlabeled = torch.tensor(0.0, device=self._device)
+weak_augment = v2.Compose([
+    v2.RandomCrop(32, 4, padding_mode='reflect'),
+    v2.RandomHorizontalFlip(),
+])
+strong_augment = v2.Compose([
+    v2.RandomCrop(32, 4, padding_mode='reflect'),
+    v2.RandomHorizontalFlip(),
+    v2.RandAugment(),
+])
 
-        return loss_unlabeled
+method = getattr(semisup, args.method)
+method = method(model, weak_augment, strong_augment, marginal_distribution)
 
+############################################## TRAIN ##############################################
 
-    def run(self):
-        scaler = torch.amp.GradScaler(device='cuda')
-        with mlflow.start_run(run_name=self._run_name):
-            mlflow.pytorch.autolog()
-            mlflow.log_param('n_epochs', self._n_epochs)
-            mlflow.log_param('tau', self._tau)
-            mlflow.log_param('lambda_u', self._lambda_u)
-            best_accuracy = 0.0
-            for epoch in range(self._n_epochs):
-                self._model.train()
-                num_batches = 0
-                for (labeled_data, labeled_target), (weak_unlabeled_data, strong_unlabeled_data) in zip(self._labeled_dataloader, self._unlabeled_dataloader):
-                    labeled_data, labeled_target, weak_unlabeled_data, strong_unlabeled_data = labeled_data.to(self._device), labeled_target.to(self._device), weak_unlabeled_data.to(self._device), strong_unlabeled_data.to(self._device)
-                    with torch.amp.autocast(device_type='cuda'):
-                        labeled_pred = self._model(labeled_data)
-                        loss_labeled = torch.nn.CrossEntropyLoss()(labeled_pred, labeled_target)
+ema_model = torch.optim.swa_utils.AveragedModel(model, multi_avg_fn=torch.optim.swa_utils.get_ema_multi_avg_fn(0.999))
+optimizer = torch.optim.AdamW(model.parameters())
 
-                        weak_pred = torch.softmax(self._model(weak_unlabeled_data), dim=1)
-                        strong_pred = self._model(strong_unlabeled_data)
-                        loss_unlabeled = self._compute_unlabeled_loss(weak_pred, strong_pred)
+for epoch in range(args.epochs):
+    # train
+    tic = time()
+    model.train()
+    avg_sup_loss = avg_unsup_loss = 0
+    semisup_n_iter = max(len(train_sup_dataloader), len(train_unsup_dataloader))
+    sup_dataloader_iter = cycle(train_sup_dataloader) if len(train_sup_dataloader) < len(train_unsup_dataloader) else iter(train_sup_dataloader)
+    unsup_dataloader_iter = cycle(train_unsup_dataloader) if len(train_unsup_dataloader) < len(train_sup_dataloader) else iter(train_unsup_dataloader)
 
-                        loss = loss_labeled + self._lambda_u * loss_unlabeled                    
-                    
-                    self._model.zero_grad()
-                    scaler.scale(loss).backward()
-                    scaler.step(self._optimizer)
-                    scaler.update()
+    for (sup_imgs, sup_labels), (unsup_imgs, _) in zip(sup_dataloader_iter, unsup_dataloader_iter):
+        sup_imgs, sup_labels = next(sup_dataloader_iter)
+        unsup_imgs = next(unsup_dataloader_iter)
+        sup_imgs = sup_imgs.to(device)
+        sup_labels = sup_labels.to(device)
+        unsup_imgs = unsup_imgs[0].to(device)
 
-                    num_batches += 1
-                    self._losses['train_loss'] += loss.item()
+        sup_loss = torch.nn.functional.cross_entropy(model(weak_augment(sup_imgs)), sup_labels)
+        unsup_loss = method(epoch, sup_imgs, sup_labels, unsup_imgs)
+        total_loss = sup_loss + args.lmbda*unsup_loss
 
-                self._model.eval()
-                with torch.no_grad():
-                    with torch.amp.autocast(device_type='cuda'):
-                        val_num_batches = 0
-                        for (images, annotations) in self._val_dataloader:
-                            val_num_batches += 1
-                            images, annotations = images.to(self._device), annotations.to(self._device)
-                            
-                            pred = self._model(images)
-                            val_loss = torch.nn.CrossEntropyLoss()(pred, annotations)
-                            self._losses['val_loss'] += val_loss.item()
-                            self._metrics['val_accuracy'].update(pred, annotations)
+        optimizer.zero_grad()
+        total_loss.backward()
+        optimizer.step()
+        if ema_model:
+            ema_model.update_parameters(model)
 
+        avg_sup_loss += float(sup_loss) / semisup_n_iter
+        avg_unsup_loss += float(unsup_loss) / semisup_n_iter
 
-                val_accuracy = self._metrics['val_accuracy'].compute().item()
+    toc = time()
+    print(f'Train - Epoch {epoch+1}/{args.epochs} - {toc-tic:.1f}s - Avg sup loss: {avg_sup_loss} - Avg unsup loss: {avg_unsup_loss}')
 
-                if val_accuracy > best_accuracy:
-                    torch.save(self._model.state_dict(), f"{self._run_name}.pth")
-                    print(f"Model saved with val Accuracy: {val_accuracy:.4f}; Epoch: {epoch+1}")
-                    best_accuracy = val_accuracy
+    # evaluate
+    eval_model = model if args.method == 'Supervised' else ema_model
+    eval_model.eval()
+    acc = metrics.MulticlassAccuracy(device=device)
+    for inputs, targets in val_dataloader:
+        inputs, targets = inputs.to(device), targets.to(device)
+        outputs = model(inputs)
+        acc.update(outputs, targets)
+    print(f'Test  - Epoch {epoch+1}/{args.epochs} - Accuracy: {acc.compute().item()}')
 
-                for loss_name, value in self._losses.items():
-                    _n_batches = val_num_batches if loss_name.startswith('val_') else num_batches
-                    mlflow.log_metric(loss_name, value / _n_batches, step=epoch+1)
-                    print("Loss: ", loss_name, value / _n_batches)
-                    self._losses[loss_name] = 0
-
-                for metric_name, metric in self._metrics.items():
-                    mlflow.log_metric(metric_name, metric.compute().item(), step=epoch+1)
-                    metric.reset()
-
-
-if __name__ == '__main__':
-
-    # model.load_state_dict(torch.load("supervised.pth", map_location=device))
-
-    labeled_training_dataset, unlabeled_training_dataset, val_dataset = imagenet_get_dataset(n_labeled=13000)
-    model = torchvision.models.resnet50(weights=None)
-    model.fc = torch.nn.Linear(2048, 1000)
-
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    model.to(device)
-
-    TrainPipeline(
-        run_name="fixmatch",
-        labeled_dataset=labeled_training_dataset,
-        unlabeled_dataset=unlabeled_training_dataset,
-        val_dataset=val_dataset,
-        model=model,
-        device=device,
-        n_classes=1000,
-        batch_size_labeled=16,
-        batch_size_unlabeled=80,
-        n_epochs=300,
-        tau=0.95,
-        lambda_u=1.0
-    ).run()
+torch.optim.swa_utils.update_bn(train_sup_dataloader, ema_model, device)
+model = model if args.method == 'Supervised' else ema_model.module
+torch.save(model.cpu(), args.output)
