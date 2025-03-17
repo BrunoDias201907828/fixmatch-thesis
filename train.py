@@ -14,8 +14,7 @@ from torchvision.transforms import v2
 from torcheval import metrics
 from itertools import cycle
 from time import time
-from semisup import semisup
-import models
+import semisup, models
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
 ############################################## DATA ##############################################
