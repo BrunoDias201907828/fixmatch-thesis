@@ -19,7 +19,7 @@ class BasicBlock(torch.nn.Module):
     def forward(self, x):
         out = torch.nn.functional.relu(self.bn1(x))
         out = self.conv1(out)
-        out = self.dropout(out) # Where to add?
+        out = self.dropout(out)
         out = torch.nn.functional.relu(self.bn2(out))
         out = self.conv2(out)
         out += self.shortcut(x)
@@ -54,6 +54,6 @@ class WideResNet(torch.nn.Module):
         out = self.layer3(out)
         out = torch.nn.functional.relu(self.bn1(out))
         out = torch.nn.functional.adaptive_avg_pool2d(out, 1)
-        out = torch.flatten(out, 1)
-        out = self.fc(out)
-        return out
+        latent = torch.flatten(out, 1)
+        out = self.fc(latent)
+        return out, latent

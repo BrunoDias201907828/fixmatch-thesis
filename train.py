@@ -25,8 +25,8 @@ transforms = v2.Compose([
     v2.Normalize((0.49139968, 0.48215827, 0.44653124), (0.24703233, 0.24348505, 0.26158768))
 ])
 num_classes = 10
-train_dataset = torchvision.datasets.CIFAR10('/data/toys', True, transforms)
-val_dataset = torchvision.datasets.CIFAR10('/data/toys', False, transforms)
+train_dataset = torchvision.datasets.CIFAR10('../data', True, transforms)
+val_dataset = torchvision.datasets.CIFAR10('../data', False, transforms)
 val_dataloader = torch.utils.data.DataLoader(val_dataset, args.sup_batchsize+args.unsup_batchsize,
     pin_memory=True, num_workers=4)
 
@@ -58,6 +58,12 @@ strong_augment = v2.Compose([
 method = getattr(semisup, args.method)
 method = method(model, weak_augment, strong_augment, marginal_distribution)
 
+class_centroids = torch.zeros(num_classes, 128, device=device)
+
+def average_centroids(labels, latent_space, momentum=0.999):
+    for i in range (latent_space.size(0)):
+        class_centroids[labels[i]] = class_centroids[labels[i]] * momentum + latent_space[i] * (1-momentum)
+    
 ############################################## TRAIN ##############################################
 
 ema_model = torch.optim.swa_utils.AveragedModel(model, multi_avg_fn=torch.optim.swa_utils.get_ema_multi_avg_fn(0.999))
@@ -78,9 +84,14 @@ for epoch in range(args.epochs):
         sup_imgs = sup_imgs.to(device)
         sup_labels = sup_labels.to(device)
         unsup_imgs = unsup_imgs[0].to(device)
+        y_pred_sup, latent_space = model(weak_augment(sup_imgs))
+        sup_loss = torch.nn.functional.cross_entropy(y_pred_sup, sup_labels)       
 
-        sup_loss = torch.nn.functional.cross_entropy(model(weak_augment(sup_imgs)), sup_labels)
-        unsup_loss = method(epoch, sup_imgs, sup_labels, unsup_imgs)
+        average_centroids(sup_labels, latent_space.detach())
+        if args.method == "FixMatch_Distance":
+            unsup_loss = method(epoch, sup_imgs, sup_labels, unsup_imgs, class_centroids)
+        else:
+            unsup_loss = method(epoch, sup_imgs, sup_labels, unsup_imgs)
         total_loss = sup_loss + args.lmbda*unsup_loss
 
         optimizer.zero_grad()
@@ -101,7 +112,7 @@ for epoch in range(args.epochs):
     acc = metrics.MulticlassAccuracy(device=device)
     for inputs, targets in val_dataloader:
         inputs, targets = inputs.to(device), targets.to(device)
-        outputs = model(inputs)
+        outputs, _ = model(inputs)
         acc.update(outputs, targets)
     print(f'Test  - Epoch {epoch+1}/{args.epochs} - Accuracy: {acc.compute().item()}')
 

@@ -1,5 +1,6 @@
 import torch, torchvision
 import copy
+import torch.nn.functional as F
 
 class Nop:
     def __init__(self, *args, **kwargs):
@@ -7,8 +8,28 @@ class Nop:
     def __call__(self, epoch, sup_imgs, sup_labels, unsup_imgs):
         return 0
 
-import torch
-import torch.nn.functional as F
+class FixMatch_Distance:
+    def __init__(self, model, weak_augment, strong_augment, marginal_distribution, distance_threshold=1000):
+        self.model = model
+        self.weak_augment = weak_augment
+        self.strong_augment = strong_augment
+        self.distance_threshold = distance_threshold
+
+    def __call__(self, epoch, sup_imgs, sup_labels, unsup_imgs, average_latent_space):
+        
+        weak_imgs = self.weak_augment(unsup_imgs)
+        with torch.no_grad():
+            weak_logits, latent_space = self.model(weak_imgs)
+            probs = weak_logits.softmax(dim=1)
+        
+        distances = torch.sqrt((latent_space.unsqueeze(1) - average_latent_space.unsqueeze(0)) ** 2).sum(dim=2)
+        min_distances, label_idx = torch.min(distances, dim=1)
+        mask = min_distances <= self.distance_threshold
+        strong_pred, _ = self.model(self.strong_augment(unsup_imgs[mask]))
+
+        # Should I add the latent space of the pseudo-labels to the ema of the latent spaces?
+
+        return torch.nn.functional.cross_entropy(strong_pred, label_idx[mask]) if mask.sum() > 0 else 0
 
 class FixMatch_Mcdropout:
     def __init__(self, model, weak_augment, strong_augment, marginal_distribution):
@@ -23,7 +44,7 @@ class FixMatch_Mcdropout:
         mc_outputs = []
         for _ in range(mc_dropout_passes):
             with torch.no_grad():
-                logits = self.model(weak_imgs)
+                logits, _ = self.model(weak_imgs)
                 probs = logits.softmax(dim=1)
             mc_outputs.append(probs)
         mc_outputs = torch.stack(mc_outputs)
@@ -53,8 +74,8 @@ class FixMatch_Mcdropout:
         final_pseudo_labels = pseudo_labels[final_mask]
         final_imgs = unsup_imgs[final_mask]
         strong_imgs = self.strong_augment(final_imgs)
-
-        return F.cross_entropy(self.model(strong_imgs), final_pseudo_labels)
+        strong_pred , _ = self.model(strong_imgs)
+        return F.cross_entropy(strong_pred, final_pseudo_labels)
 
 
 class FixMatch:
@@ -67,12 +88,13 @@ class FixMatch:
     def __call__(self, epoch, sup_imgs, sup_labels, unsup_imgs, confidence=0.95):
         weak_imgs = self.weak_augment(unsup_imgs)
         with torch.no_grad():
-            weak_logits = self.model(weak_imgs)
+            weak_logits, _ = self.model(weak_imgs)
         weak_probs = weak_logits.softmax(1)
         max_probs, weak_labels = weak_probs.max(1)
         ix = max_probs >= confidence
         strong_imgs = self.strong_augment(unsup_imgs[ix])
-        return torch.nn.functional.cross_entropy(self.model(strong_imgs), weak_labels[ix]) if ix.sum() > 0 else 0
+        strong_pred, _ = self.model(strong_imgs)
+        return torch.nn.functional.cross_entropy(strong_pred, weak_labels[ix]) if ix.sum() > 0 else 0
 
 class MixMatch:
     # https://proceedings.neurips.cc/paper_files/paper/2019/hash/1cd138d0499a68f4bb72bee04bbec2d7-Abstract.html
