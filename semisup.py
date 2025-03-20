@@ -9,7 +9,7 @@ class Nop:
         return 0
 
 class FixMatch_Distance:
-    def __init__(self, model, weak_augment, strong_augment, marginal_distribution, distance_threshold=1000):
+    def __init__(self, model, weak_augment, strong_augment, marginal_distribution, distance_threshold=1500):
         self.model = model
         self.weak_augment = weak_augment
         self.strong_augment = strong_augment
@@ -37,46 +37,32 @@ class FixMatch_Mcdropout:
         self.weak_augment = weak_augment
         self.strong_augment = strong_augment
 
-    def __call__(self, epoch, sup_imgs, sup_labels, unsup_imgs, confidence=0.85, mc_dropout_passes=20):
+    def __call__(self, epoch, sup_imgs, sup_labels, unsup_imgs, confidence=0.85, mc_dropout_passes=30):
         weak_imgs = self.weak_augment(unsup_imgs)
         was_training = self.model.training
         self.model.train()
-        mc_outputs = []
-        for _ in range(mc_dropout_passes):
-            with torch.no_grad():
-                logits, _ = self.model(weak_imgs)
-                probs = logits.softmax(dim=1)
-            mc_outputs.append(probs)
-        mc_outputs = torch.stack(mc_outputs)
-        mc_mean = mc_outputs.mean(dim=0)        
+        with torch.no_grad():
+            mc_logits = torch.stack([self.model(weak_imgs)[0] for _ in range(mc_dropout_passes)])
         if not was_training:
             self.model.eval()
-
-        max_conf, _ = mc_mean.max(dim=1)
+        mc_probs = torch.softmax(mc_logits, 2)
+        mc_logprobs = F.log_softmax(mc_logits, 2)
+        mc_mean_probs = torch.mean(mc_probs, 0)
+        # confidence threshold
+        max_conf, weak_labels = mc_mean_probs.max(dim=1)
         conf_mask = max_conf >= confidence
-
-        # MI = H(average prediction) - average H(individual prediction)
-        eps = 1e-10 # low value to avoid log(0)
-        H_avg = - (mc_mean * torch.log(mc_mean + eps)).sum(dim=1)
-        H_each = - (mc_outputs * torch.log(mc_outputs + eps)).sum(dim=2)
+        # mutual information
+        eps = 1e-10
+        H_avg = - (mc_mean_probs * torch.log(mc_mean_probs + eps)).sum(dim=1)
+        H_each = - (mc_probs * mc_logprobs).sum(dim=2)
         mean_H = H_each.mean(dim=0)
         mi = H_avg - mean_H
-
-        num_classes = mc_mean.size(1)
-        normalized_mi = mi / torch.log(torch.tensor(num_classes, dtype=mi.dtype))
+        normalized_mi = mi / torch.log(torch.tensor(mc_logits.size(2), dtype=mi.dtype))
+        # selected pseudo-labels confidence threshold + mi 
         mi_mask = normalized_mi < (1 - confidence)
-
         final_mask = conf_mask & mi_mask
-        if final_mask.sum() == 0:
-            return 0
-
-        pseudo_labels = mc_mean.argmax(dim=1)
-        final_pseudo_labels = pseudo_labels[final_mask]
-        final_imgs = unsup_imgs[final_mask]
-        strong_imgs = self.strong_augment(final_imgs)
-        strong_pred , _ = self.model(strong_imgs)
-        return F.cross_entropy(strong_pred, final_pseudo_labels)
-
+        strong_imgs = self.strong_augment(unsup_imgs[final_mask])
+        return F.cross_entropy(self.model(strong_imgs)[0], weak_labels[final_mask]) if final_mask.sum() > 0 else 0
 
 class FixMatch:
     # https://proceedings.neurips.cc/paper/2020/hash/06964dce9addb1c5cb5d6e3d9838f733-Abstract.html
