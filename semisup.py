@@ -20,10 +20,10 @@ class FixMatch_Distance:
         weak_imgs = self.weak_augment(unsup_imgs)
         with torch.no_grad():
             weak_logits, latent_space = self.model(weak_imgs)
-            probs = weak_logits.softmax(dim=1)
+            probs = weak_logits.softmax(1)
         
-        distances = torch.sqrt((latent_space.unsqueeze(1) - average_latent_space.unsqueeze(0)) ** 2).sum(dim=2)
-        min_distances, label_idx = torch.min(distances, dim=1)
+        distances = torch.sqrt((latent_space.unsqueeze(1) - average_latent_space.unsqueeze(0)) ** 2).sum(2)
+        min_distances, label_idx = torch.min(distances, 1)
         mask = min_distances <= self.distance_threshold
         strong_pred, _ = self.model(self.strong_augment(unsup_imgs[mask]))
 
@@ -49,13 +49,13 @@ class FixMatch_Mcdropout:
         mc_logprobs = F.log_softmax(mc_logits, 2)
         mc_mean_probs = torch.mean(mc_probs, 0)
         # confidence threshold
-        max_conf, weak_labels = mc_mean_probs.max(dim=1)
+        max_conf, weak_labels = mc_mean_probs.max(1)
         conf_mask = max_conf >= confidence
         # mutual information
         eps = 1e-10
-        H_avg = - (mc_mean_probs * torch.log(mc_mean_probs + eps)).sum(dim=1)
-        H_each = - (mc_probs * mc_logprobs).sum(dim=2)
-        mean_H = H_each.mean(dim=0)
+        H_avg = - (mc_mean_probs * torch.log(mc_mean_probs + eps)).sum(1)
+        H_each = - (mc_probs * mc_logprobs).sum(2)
+        mean_H = H_each.mean(0)
         mi = H_avg - mean_H
         normalized_mi = mi / torch.log(torch.tensor(mc_logits.size(2), dtype=mi.dtype))
         # selected pseudo-labels confidence threshold + mi 
