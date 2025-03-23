@@ -84,16 +84,9 @@ for epoch in range(args.epochs):
         sup_imgs = sup_imgs.to(device)
         sup_labels = sup_labels.to(device)
         unsup_imgs = unsup_imgs[0].to(device)
-        y_pred_sup, latent_space = model(weak_augment(sup_imgs))
-        sup_loss = torch.nn.functional.cross_entropy(y_pred_sup, sup_labels)       
+        sup_loss, unsup_loss = method(epoch, sup_imgs, sup_labels, unsup_imgs)
 
-        average_centroids(sup_labels, latent_space.detach())
-        if args.method == "FixMatch_Distance":
-            unsup_loss = method(epoch, sup_imgs, sup_labels, unsup_imgs, class_centroids)
-        else:
-            unsup_loss = method(epoch, sup_imgs, sup_labels, unsup_imgs)
         total_loss = sup_loss + args.lmbda*unsup_loss
-
         optimizer.zero_grad()
         total_loss.backward()
         optimizer.step()
