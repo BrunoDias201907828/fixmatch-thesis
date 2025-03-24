@@ -54,17 +54,24 @@ class FixMatch_Distance:
         self.average_latent_space = torch.zeros(self.num_classes, 128)
 
     def __call__(self, epoch, sup_imgs, sup_labels, unsup_imgs):
+
+        def extract_latent_space(module, input, output):
+            nonlocal latent_space
+            latent_space = input
+            return latent_space
+
+        #compara o average latent space de cada classe com o latent space the cada unlabeled image
+        # devo calcular o average_latent_space para todas as epocs, ou apenas esta batch?
         weak_sup = self.weak_augment(sup_imgs)
+        hook = self.model.fc.register_forward_pre_hook(extract_latent_space)
         sup_pred = self.model(weak_sup)[0]
         weak_imgs = self.weak_augment(unsup_imgs)
         with torch.no_grad():
             weak_logits, latent_space = self.model(weak_imgs)
             probs = weak_logits.softmax(1)
-
-        
         distances = torch.sqrt((latent_space[:,None] - self.average_latent_space[None,:]) ** 2).sum(2)
         min_distances, label_idx = torch.min(distances, 1)
-        mask = min_distances <= self.distance_threshold
+        mask = min_distances <= self.distance_threshold # usar threshold? Ou usar o valor mais próximo
         strong_imgs = self.strong_augment(unsup_imgs[mask])
 
         # Should I add the latent space of the pseudo-labels to the ema of the latent spaces?
