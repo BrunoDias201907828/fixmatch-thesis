@@ -1,6 +1,7 @@
 import torch, torchvision
 import copy
 import torch.nn.functional as F
+from collections import deque
 
 class Nop:
     def __init__(self, *args, **kwargs):
@@ -45,65 +46,43 @@ class FixMatch_DeepBilevel:
 
 
 class FixMatch_Distance:
-    def __init__(self, model, weak_augment, strong_augment, marginal_distribution, distance_threshold=1500):
+    def __init__(self, model, weak_augment, strong_augment, marginal_distribution, frequence_threshold=0.95):
         self.model = model
         self.weak_augment = weak_augment
         self.strong_augment = strong_augment
-        self.distance_threshold = distance_threshold
+        self.frequence_threshold = frequence_threshold
         self.num_classes = len(marginal_distribution)
-        self.average_latent_space = torch.zeros(self.num_classes, 128)
+        self.latent_space_per_class = [deque(maxlen=10) for _ in range(self.num_classes)]
 
     def __call__(self, epoch, sup_imgs, sup_labels, unsup_imgs):
-
+        latent_space = None
         def extract_latent_space(module, input, output):
             nonlocal latent_space
-            latent_space = input
-            return latent_space
+            latent_space = input[0].detach()
 
-        #compara o average latent space de cada classe com o latent space the cada unlabeled image
-        # devo calcular o average_latent_space para todas as epocs, ou apenas esta batch?
+        hook = self.model.fc.register_forward_hook(extract_latent_space)
         weak_sup = self.weak_augment(sup_imgs)
-        hook = self.model.fc.register_forward_pre_hook(extract_latent_space)
-        sup_pred = self.model(weak_sup)[0]
+        sup_pred = self.model(weak_sup)
+        for i in range(len(sup_imgs)):
+            label = sup_labels[i].item()
+            self.latent_space_per_class[label].append(latent_space[i])
         weak_imgs = self.weak_augment(unsup_imgs)
         with torch.no_grad():
-            weak_logits, latent_space = self.model(weak_imgs)
+            weak_logits = self.model(weak_imgs)
             probs = weak_logits.softmax(1)
-        distances = torch.sqrt((latent_space[:,None] - self.average_latent_space[None,:]) ** 2).sum(2)
-        min_distances, label_idx = torch.min(distances, 1)
-        mask = min_distances <= self.distance_threshold # usar threshold? Ou usar o valor mais próximo
-        strong_imgs = self.strong_augment(unsup_imgs[mask])
+        weak_labels = probs.argmax(1)
+        hook.remove()        
 
-        # Should I add the latent space of the pseudo-labels to the ema of the latent spaces?
-
+        avg_latent_space = torch.stack([torch.stack(list(deque)).mean(0) if len(deque) > 0 else torch.zeros(128) for deque in self.latent_space_per_class])
+        distancias = (latent_space[:, None, :] - avg_latent_space[None, :, :]) ** 2
+        distancias = torch.sqrt(distancias.sum(-1))
+        label_idx = torch.argmin(distancias, 1)
+        freqs = (label_idx == weak_labels).float().mean()
+        ix = freqs >= self.frequence_threshold
+        strong_imgs = self.strong_augment(unsup_imgs[ix])
         supervised_loss = F.cross_entropy(sup_pred, sup_labels)
-        unsupervised_loss = F.cross_entropy(self.model(strong_imgs)[0], label_idx[mask]) if mask.sum() > 0 else 0
+        unsupervised_loss = F.cross_entropy(self.model(strong_imgs), label_idx[ix]) if ix.sum() > 0 else 0
         return supervised_loss, unsupervised_loss
-
-
-
-# class FixMatch_Distance:
-#     def __init__(self, model, weak_augment, strong_augment, marginal_distribution, distance_threshold=1500):
-#         self.model = model
-#         self.weak_augment = weak_augment
-#         self.strong_augment = strong_augment
-#         self.distance_threshold = distance_threshold
-#         self.num_classes = len(marginal_distribution)
-#         self.average_latent_space = torch.zeros(self.num_classes, 128)
-
-#     def __call__(self, epoch, sup_imgs, sup_labels, unsup_imgs, average_latent_space):
-#         weak_imgs = self.weak_augment(unsup_imgs)
-#         with torch.no_grad():
-#             weak_logits, latent_space = self.model(weak_imgs)
-#             probs = weak_logits.softmax(1)        
-#         distances = torch.sqrt((latent_space[:,None] - average_latent_space[None,:]) ** 2).sum(2)
-#         min_distances, label_idx = torch.min(distances, 1)
-#         mask = min_distances <= self.distance_threshold
-#         strong_imgs = self.strong_augment(unsup_imgs[mask])
-
-#         # Should I add the latent space of the pseudo-labels to the ema of the latent spaces?
-
-#         return torch.nn.functional.cross_entropy(self.model(strong_imgs)[0], label_idx[mask]) if mask.sum() > 0 else 0
 
 class FixMatch_Mcdropout:
     def __init__(self, model, weak_augment, strong_augment, marginal_distribution):
@@ -114,11 +93,11 @@ class FixMatch_Mcdropout:
     def __call__(self, epoch, sup_imgs, sup_labels, unsup_imgs, confidence=0.85, mc_dropout_passes=30):
         weak_sup = self.weak_augment(sup_imgs)
         weak_imgs = self.weak_augment(unsup_imgs)
-        sup_pred = self.model(weak_sup)[0]
+        sup_pred = self.model(weak_sup)
         was_training = self.model.training
         self.model.train()
         with torch.no_grad():
-            mc_logits = torch.stack([self.model(weak_imgs)[0] for _ in range(mc_dropout_passes)])
+            mc_logits = torch.stack([self.model(weak_imgs) for _ in range(mc_dropout_passes)])
         if not was_training:
             self.model.eval()
         mc_probs = torch.softmax(mc_logits, 2)
@@ -139,7 +118,7 @@ class FixMatch_Mcdropout:
         final_mask = conf_mask & mi_mask
         strong_imgs = self.strong_augment(unsup_imgs[final_mask])
         supervised_loss = F.cross_entropy(sup_pred, sup_labels)
-        unsupervised_loss = F.cross_entropy(self.model(strong_imgs)[0], weak_labels[final_mask]) if final_mask.sum() > 0 else 0
+        unsupervised_loss = F.cross_entropy(self.model(strong_imgs), weak_labels[final_mask]) if final_mask.sum() > 0 else 0
         return supervised_loss, unsupervised_loss
 
 class FixMatch:
@@ -151,15 +130,15 @@ class FixMatch:
 
     def __call__(self, epoch, sup_imgs, sup_labels, unsup_imgs, confidence=0.95):
         weak_sup = self.weak_augment(sup_imgs)
-        sup_pred = self.model(weak_sup)[0]
+        sup_pred = self.model(weak_sup)
         weak_imgs = self.weak_augment(unsup_imgs)
         with torch.no_grad():
-            weak_logits = self.model(weak_imgs)[0]
+            weak_logits = self.model(weak_imgs)
         weak_probs = weak_logits.softmax(1)
         max_probs, weak_labels = weak_probs.max(1)
         ix = max_probs >= confidence
         strong_imgs = self.strong_augment(unsup_imgs[ix])
-        strong_pred = self.model(strong_imgs)[0]
+        strong_pred = self.model(strong_imgs)
         supervised_loss = F.cross_entropy(sup_pred, sup_labels)
         unsupervised_loss = F.cross_entropy(strong_pred, weak_labels[ix]) if ix.sum() > 0 else 0
         return supervised_loss, unsupervised_loss

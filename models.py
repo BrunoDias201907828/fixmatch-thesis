@@ -54,6 +54,6 @@ class WideResNet(torch.nn.Module):
         out = self.layer3(out)
         out = torch.nn.functional.relu(self.bn1(out))
         out = torch.nn.functional.adaptive_avg_pool2d(out, 1)
-        latent = torch.flatten(out, 1)
-        out = self.fc(latent)
-        return out, latent
+        out = torch.flatten(out, 1)
+        out = self.fc(out)
+        return out

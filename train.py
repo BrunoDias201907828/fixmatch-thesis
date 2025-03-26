@@ -105,7 +105,7 @@ for epoch in range(args.epochs):
     acc = metrics.MulticlassAccuracy(device=device)
     for inputs, targets in val_dataloader:
         inputs, targets = inputs.to(device), targets.to(device)
-        outputs, _ = model(inputs)
+        outputs = model(inputs)
         acc.update(outputs, targets)
     print(f'Test  - Epoch {epoch+1}/{args.epochs} - Accuracy: {acc.compute().item()}')
 
