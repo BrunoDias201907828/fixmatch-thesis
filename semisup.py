@@ -53,6 +53,7 @@ class FixMatch_Distance:
         self.frequence_threshold = frequence_threshold
         self.num_classes = len(marginal_distribution)
         self.latent_space_per_class = [deque(maxlen=10) for _ in range(self.num_classes)]
+        self.device = next(model.parameters()).device
 
     def __call__(self, epoch, sup_imgs, sup_labels, unsup_imgs):
         latent_space = None
@@ -61,26 +62,27 @@ class FixMatch_Distance:
             latent_space = input[0].detach()
 
         hook = self.model.fc.register_forward_hook(extract_latent_space)
-        weak_sup = self.weak_augment(sup_imgs)
+        weak_sup = self.weak_augment(sup_imgs).to(self.device)
         sup_pred = self.model(weak_sup)
         for i in range(len(sup_imgs)):
             label = sup_labels[i].item()
-            self.latent_space_per_class[label].append(latent_space[i])
-        weak_imgs = self.weak_augment(unsup_imgs)
+            self.latent_space_per_class[label].append(latent_space[i].to(self.device))
+        weak_imgs = self.weak_augment(unsup_imgs).to(self.device)
         with torch.no_grad():
             weak_logits = self.model(weak_imgs)
             probs = weak_logits.softmax(1)
         weak_labels = probs.argmax(1)
-        hook.remove()        
+        hook.remove()    
+        unsup_latent = latent_space.to(self.device)    
 
-        avg_latent_space = torch.stack([torch.stack(list(deque)).mean(0) if len(deque) > 0 else torch.zeros(128) for deque in self.latent_space_per_class])
-        distancias = (latent_space[:, None, :] - avg_latent_space[None, :, :]) ** 2
+        avg_latent_space = torch.stack([torch.stack(list(deque)).mean(0) if len(deque) > 0 else torch.zeros(128, device=self.device) for deque in self.latent_space_per_class])
+        distancias = (unsup_latent[:, None, :] - avg_latent_space[None, :, :]) ** 2
         distancias = torch.sqrt(distancias.sum(-1))
         label_idx = torch.argmin(distancias, 1)
-        freqs = (label_idx == weak_labels).float().mean()
+        freqs = (label_idx == weak_labels.to(self.device)).float().mean()
         ix = freqs >= self.frequence_threshold
-        strong_imgs = self.strong_augment(unsup_imgs[ix])
-        supervised_loss = F.cross_entropy(sup_pred, sup_labels)
+        strong_imgs = self.strong_augment(unsup_imgs[ix].to(self.device))
+        supervised_loss = F.cross_entropy(sup_pred, sup_labels.to(self.device))
         unsupervised_loss = F.cross_entropy(self.model(strong_imgs), label_idx[ix]) if ix.sum() > 0 else 0
         return supervised_loss, unsupervised_loss
 
