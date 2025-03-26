@@ -46,7 +46,7 @@ class FixMatch_DeepBilevel:
 
 
 class FixMatch_Distance:
-    def __init__(self, model, weak_augment, strong_augment, marginal_distribution, frequence_threshold=0.01):
+    def __init__(self, model, weak_augment, strong_augment, marginal_distribution, frequence_threshold=0.90):
         self.model = model
         self.weak_augment = weak_augment
         self.strong_augment = strong_augment
@@ -74,14 +74,14 @@ class FixMatch_Distance:
         weak_labels = probs.argmax(1)
         hook.remove()    
         unsup_latent = latent_space.to(self.device)    
-
         avg_latent_space = torch.stack([torch.stack(list(deque)).mean(0) if len(deque) > 0 else torch.zeros(128, device=self.device) for deque in self.latent_space_per_class])
+
         distancias = (unsup_latent[:, None, :] - avg_latent_space[None, :, :]) ** 2
         distancias = torch.sqrt(distancias.sum(-1))
         label_idx = torch.argmin(distancias, 1)
         freqs = (label_idx == weak_labels.to(self.device)).float().mean()
         ix = freqs >= self.frequence_threshold
-        strong_imgs = self.strong_augment(weak_imgs.to(self.device))
+        strong_imgs = self.strong_augment(unsup_imgs).to(self.device)
         supervised_loss = F.cross_entropy(sup_pred, sup_labels.to(self.device))
         unsupervised_loss = F.cross_entropy(self.model(strong_imgs), weak_labels) if ix == True else 0
         return supervised_loss, unsupervised_loss
@@ -139,7 +139,7 @@ class FixMatch:
         weak_probs = weak_logits.softmax(1)
         max_probs, weak_labels = weak_probs.max(1)
         ix = max_probs >= confidence
-        strong_imgs = self.strong_augment(weak_imgs[ix])
+        strong_imgs = self.strong_augment(unsup_imgs[ix])
         strong_pred = self.model(strong_imgs)
         supervised_loss = F.cross_entropy(sup_pred, sup_labels)
         unsupervised_loss = F.cross_entropy(strong_pred, weak_labels[ix]) if ix.sum() > 0 else 0
