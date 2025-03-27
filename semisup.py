@@ -27,44 +27,49 @@ class FixMatch_DeepBilevel:
     def __call__(self, epoch, sup_imgs, sup_labels, unsup_imgs):
         sup_preds = self.model(self.weak_augment(sup_imgs))
         for sup_img, sup_label in zip(sup_imgs, sup_labels):
-            sup_img = sup_img.unsqueeze(0).to(self.device)
-            sup_label = sup_label.unsqueeze(0).to(self.device)
+            # sup_img = sup_img.unsqueeze(0) # .to(self.device)
+            sup_img = sup_img[None,:]
+            # sup_label = sup_label.unsqueeze(0) # .to(self.device)
+            sup_label = sup_label[None]
             self.model.zero_grad()
             F.cross_entropy(self.model(self.weak_augment(sup_img)), sup_label).backward()
             grads = torch.cat([p.grad.view(-1) for p in self.model.parameters() if p.grad is not None])
-            self.gradients_per_class[sup_label.item()].append(grads.to(self.device))
+            self.gradients_per_class[sup_label.item()].append(grads) # test memory removed grads.to(self.device)
         avg_gradients_per_class = torch.stack([torch.stack(list(deque)).mean(0) if len(deque) > 0 else torch.zeros(1467610, device=self.device) for deque in self.gradients_per_class])
 
         weak_labels_list = []
         grads_unsup = []
         for unsup_img in unsup_imgs:
-            weak_img = self.weak_augment(unsup_img.unsqueeze(0)).to(self.device)
+            weak_img = self.weak_augment(unsup_img.unsqueeze(0)) # .to(self.device)
             self.model.zero_grad()
             with torch.no_grad():
                 weak_logits = self.model(weak_img)
             probs = weak_logits.softmax(1)
             weak_label = probs.argmax(1)
             weak_labels_list.append(weak_label.item())
-            strong_img = self.strong_augment(weak_img).to(self.device)
+            strong_img = self.strong_augment(weak_img) # .to(self.device)
             F.cross_entropy(self.model(strong_img), weak_label).backward()
             grads = torch.cat([p.grad.view(-1) for p in self.model.parameters() if p.grad is not None])
-            grads_unsup.append(grads.to(self.device))
+            grads_unsup.append(grads) # test memory removed grads.to(self.device)
         grads_unsup = torch.stack(grads_unsup)
-        weak_labels = torch.tensor(weak_labels_list, device=self.device)
+        weak_labels = torch.tensor(weak_labels_list) # , device=self.device)
 
-        distancias = (grads_unsup[:, None, :] - avg_gradients_per_class[None, :, :]) ** 2
-        distancias = torch.sqrt(distancias.sum(-1))
-        label_idx = torch.argmin(distancias, 1)
+        cosine_similarities = F.cosine_similarity(grads_unsup[:, None, :], avg_gradients_per_class[None, :, :],-1)
+        label_idx = torch.argmax(cosine_similarities, dim=1)
 
-        freqs = (label_idx == weak_labels.to(self.device)).float().mean()
+        # distancias = (grads_unsup[:, None, :] - avg_gradients_per_class[None, :, :]) ** 2
+        # distancias = torch.sqrt(distancias.sum(-1))
+        # label_idx = torch.argmin(distancias, 1)
+
+        freqs = (label_idx == weak_labels).float().mean() # test memory removed weak_labels.to(self.device)
         ix = freqs >= self.frequency_threshold
-        strong_imgs = self.strong_augment(unsup_imgs).to(self.device)
-        supervised_loss = F.cross_entropy(sup_preds, sup_labels.to(self.device))
+        strong_imgs = self.strong_augment(unsup_imgs) # .to(self.device)
+        supervised_loss = F.cross_entropy(sup_preds, sup_labels) # test memory removed sup_labels.to(self.device)
         unsupervised_loss = F.cross_entropy(self.model(strong_imgs), weak_labels) if ix == True else 0
         return supervised_loss, unsupervised_loss
 
 class FixMatch_Distance:
-    def __init__(self, model, weak_augment, strong_augment, marginal_distribution, frequency_threshold=0.90):
+    def __init__(self, model, weak_augment, strong_augment, marginal_distribution, frequency_threshold=0.85):
         self.model = model
         self.weak_augment = weak_augment
         self.strong_augment = strong_augment
@@ -94,6 +99,9 @@ class FixMatch_Distance:
         unsup_latent = latent_space.to(self.device)    
         avg_latent_space = torch.stack([torch.stack(list(deque)).mean(0) if len(deque) > 0 else torch.zeros(128, device=self.device) for deque in self.latent_space_per_class])
 
+        # cosine_similarities = F.cosine_similarity(unsup_latent[:, None, :], avg_latent_space[None, :, :],-1)
+        # label_idx = torch.argmax(cosine_similarities, dim=1)
+
         distancias = (unsup_latent[:, None, :] - avg_latent_space[None, :, :]) ** 2
         distancias = torch.sqrt(distancias.sum(-1))
         label_idx = torch.argmin(distancias, 1)
@@ -102,7 +110,7 @@ class FixMatch_Distance:
         strong_imgs = self.strong_augment(unsup_imgs).to(self.device)
         supervised_loss = F.cross_entropy(sup_pred, sup_labels.to(self.device))
         unsupervised_loss = F.cross_entropy(self.model(strong_imgs), weak_labels) if ix == True else 0
-        return supervised_loss, unsupervised_loss
+        return supervised_loss, unsupervised_loss # can either use the weak labels and or the label_idx (from distances) as ground truth in the unsupervised loss
 
 class FixMatch_Mcdropout:
     def __init__(self, model, weak_augment, strong_augment, marginal_distribution):
