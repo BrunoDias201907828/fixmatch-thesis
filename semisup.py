@@ -3,7 +3,7 @@ import copy
 import torch.nn.functional as F
 from collections import deque
 
-class Suoervised:
+class Supervised:
     def __init__(self, model, weak_augment, strong_augment, marginal_distribution):
         self.model = model
         self.weak_augment = weak_augment
@@ -24,8 +24,8 @@ class FixMatch_DeepBilevel:
         self.gradients_per_class = [deque(maxlen=10) for _ in range(self.num_classes)]
         self.device = next(model.parameters()).device
 
-
     def __call__(self, epoch, sup_imgs, sup_labels, unsup_imgs):
+        sup_preds = self.model(self.weak_augment(sup_imgs))
         for sup_img, sup_label in zip(sup_imgs, sup_labels):
             sup_img = sup_img.unsqueeze(0).to(self.device)
             sup_label = sup_label.unsqueeze(0).to(self.device)
@@ -33,10 +33,9 @@ class FixMatch_DeepBilevel:
             F.cross_entropy(self.model(self.weak_augment(sup_img)), sup_label).backward()
             grads = torch.cat([p.grad.view(-1) for p in self.model.parameters() if p.grad is not None])
             self.gradients_per_class[sup_label.item()].append(grads.to(self.device))
-
         avg_gradients_per_class = torch.stack([torch.stack(list(deque)).mean(0) if len(deque) > 0 else torch.zeros(1467610, device=self.device) for deque in self.gradients_per_class])
 
-        weak_imgs = self.weak_augment(unsup_imgs).to(self.device)
+        weak_labels_list = []
         grads_unsup = []
         for unsup_img in unsup_imgs:
             weak_img = self.weak_augment(unsup_img.unsqueeze(0)).to(self.device)
@@ -45,65 +44,24 @@ class FixMatch_DeepBilevel:
                 weak_logits = self.model(weak_img)
             probs = weak_logits.softmax(1)
             weak_label = probs.argmax(1)
+            weak_labels_list.append(weak_label.item())
             strong_img = self.strong_augment(weak_img).to(self.device)
             F.cross_entropy(self.model(strong_img), weak_label).backward()
             grads = torch.cat([p.grad.view(-1) for p in self.model.parameters() if p.grad is not None])
             grads_unsup.append(grads.to(self.device))
-
-
-        # VER ESTE STACK E GARANTIR QUE É IGUAL AOS ESPACOS LATENTES
         grads_unsup = torch.stack(grads_unsup)
-
-
-
+        weak_labels = torch.tensor(weak_labels_list, device=self.device)
 
         distancias = (grads_unsup[:, None, :] - avg_gradients_per_class[None, :, :]) ** 2
         distancias = torch.sqrt(distancias.sum(-1))
         label_idx = torch.argmin(distancias, 1)
 
-
         freqs = (label_idx == weak_labels.to(self.device)).float().mean()
         ix = freqs >= self.frequency_threshold
         strong_imgs = self.strong_augment(unsup_imgs).to(self.device)
-        supervised_loss = F.cross_entropy(sup_pred, sup_labels.to(self.device))
+        supervised_loss = F.cross_entropy(sup_preds, sup_labels.to(self.device))
         unsupervised_loss = F.cross_entropy(self.model(strong_imgs), weak_labels) if ix == True else 0
         return supervised_loss, unsupervised_loss
-
-
-
-
-
-        return 0
-
-
-        # optimizer = torch.optim.AdamW(self.model.parameters())
-        # #supervised cycle
-        # for sup_img, sup_label in zip(sup_imgs, sup_labels):
-        #     loss = F.cross_entropy(self.model(self.weak_augment(sup_img)), sup_label)
-        #     optimizer.zero_grad()
-        #     loss.backward()
-        #     gradients = torch.cat([param.grad.view(-1) for param in self.model.parameters() if param.grad is not None])
-
-        # return 0
-        # ao ter aqui os gradientes supervised estou a repetir o que está no train.py mas já dá para testar. Se fizer assim, apenas utilizarei os gradientes desta batch, o que tbm dá alguma estabilidade ao modelo já que os gradientes no inicio podem ser muito diferentes dos gradientes depois, mesmo que seja uma media.  
-
-            
-        # sup_gradients = torch.tensor(gradients, sup_label)
-            
-        weak_imgs = self.weak_augment(unsup_imgs)
-        for weak_img in weak_imgs: 
-            strong_img = self.strong_augment(weak_img)
-            loss = F.cross_entropy(self.model(strong_img[None,:])[0], self.model(weak_img[None,:])[0])
-            optimizer.zero_grad()
-            loss.backward()
-            gradients = torch.cat([param.grad.view(-1) for param in self.model.parameters() if param.grad is not None])
-
-            # for param in self.model.parameters():
-            #     if param.grad is not None:
-            #         print(param.grad.shape)
-            # print(gradients.shape)
-        return 0
-
 
 class FixMatch_Distance:
     def __init__(self, model, weak_augment, strong_augment, marginal_distribution, frequency_threshold=0.90):
