@@ -34,13 +34,13 @@ class FixMatch_DeepBilevel:
             self.model.zero_grad()
             F.cross_entropy(self.model(self.weak_augment(sup_img)), sup_label).backward()
             grads = torch.cat([p.grad.view(-1) for p in self.model.parameters() if p.grad is not None])
-            self.gradients_per_class[sup_label.item()].append(grads) # test memory removed grads.to(self.device)
-        avg_gradients_per_class = torch.stack([torch.stack(list(deque)).mean(0) if len(deque) > 0 else torch.zeros(1467610, device=self.device) for deque in self.gradients_per_class])
+            self.gradients_per_class[sup_label.item()].append(grads.to(self.device)) # test memory removed grads.to(self.device)
+        avg_gradients_per_class = torch.stack([torch.stack(list(deque)).mean(0) if len(deque) > 0 else torch.zeros(1467610, device=self.device) for deque in self.gradients_per_class]).to(self.device)
 
         weak_labels_list = []
         grads_unsup = []
         for unsup_img in unsup_imgs:
-            weak_img = self.weak_augment(unsup_img.unsqueeze(0)) # .to(self.device)
+            weak_img = self.weak_augment(unsup_img.unsqueeze(0)).to(self.device) # .to(self.device)
             self.model.zero_grad()
             with torch.no_grad():
                 weak_logits = self.model(weak_img)
@@ -50,9 +50,9 @@ class FixMatch_DeepBilevel:
             strong_img = self.strong_augment(weak_img) # .to(self.device)
             F.cross_entropy(self.model(strong_img), weak_label).backward()
             grads = torch.cat([p.grad.view(-1) for p in self.model.parameters() if p.grad is not None])
-            grads_unsup.append(grads) # test memory removed grads.to(self.device)
+            grads_unsup.append(grads.to(self.device)) # test memory removed grads.to(self.device)
         grads_unsup = torch.stack(grads_unsup)
-        weak_labels = torch.tensor(weak_labels_list) # , device=self.device)
+        weak_labels = torch.tensor(weak_labels_list, device=self.device)
 
         cosine_similarities = F.cosine_similarity(grads_unsup[:, None, :], avg_gradients_per_class[None, :, :],-1)
         label_idx = torch.argmax(cosine_similarities, dim=1)
@@ -63,7 +63,7 @@ class FixMatch_DeepBilevel:
 
         freqs = (label_idx == weak_labels).float().mean() # test memory removed weak_labels.to(self.device)
         ix = freqs >= self.frequency_threshold
-        strong_imgs = self.strong_augment(unsup_imgs) # .to(self.device)
+        strong_imgs = self.strong_augment(unsup_imgs).to(self.device)
         supervised_loss = F.cross_entropy(sup_preds, sup_labels) # test memory removed sup_labels.to(self.device)
         unsupervised_loss = F.cross_entropy(self.model(strong_imgs), weak_labels) if ix == True else 0
         return supervised_loss, unsupervised_loss
