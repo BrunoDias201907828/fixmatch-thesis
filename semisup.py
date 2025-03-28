@@ -37,8 +37,9 @@ class FixMatch_DeepBilevel:
 
         weak_labels_list = []
         grads_unsup = []
-        for unsup_img in unsup_imgs:
-            weak_img = self.weak_augment(unsup_img.unsqueeze(0)) # .to(self.device)
+        weak_imgs = self.weak_augment(unsup_imgs).to(self.device)
+        for weak_img in weak_imgs:
+            weak_img = weak_img[None,:]
             self.model.zero_grad()
             with torch.no_grad():
                 weak_logits = self.model(weak_img)
