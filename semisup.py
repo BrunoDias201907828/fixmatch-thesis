@@ -25,14 +25,22 @@ class FixMatch_DeepBilevel:
         self.device = next(model.parameters()).device
 
     def __call__(self, epoch, sup_imgs, sup_labels, unsup_imgs):
+        # sup_preds = self.model(self.weak_augment(sup_imgs))
+        # for sup_img, sup_label in zip(sup_imgs, sup_labels):
+        #     sup_img = sup_img[None,:]
+        #     sup_label = sup_label[None]
+        #     self.model.zero_grad()
+        #     F.cross_entropy(self.model(self.weak_augment(sup_img)), sup_label).backward()
+        #     grads = torch.cat([p.grad.view(-1) for p in self.model.parameters() if p.grad is not None])
+        #     self.gradients_per_class[sup_label.item()].append(grads) # test memory removed grads.to(self.device)
+
         sup_preds = self.model(self.weak_augment(sup_imgs))
-        for sup_img, sup_label in zip(sup_imgs, sup_labels):
-            sup_img = sup_img[None,:]
-            sup_label = sup_label[None]
+        losses = F.cross_entropy(sup_preds, sup_labels)
+        for label, loss in zip(sup_labels, losses):
             self.model.zero_grad()
-            F.cross_entropy(self.model(self.weak_augment(sup_img)), sup_label).backward()
+            loss.backward(retain_graph=True)
             grads = torch.cat([p.grad.view(-1) for p in self.model.parameters() if p.grad is not None])
-            self.gradients_per_class[sup_label.item()].append(grads) # test memory removed grads.to(self.device)
+            self.gradients_per_class[label.item()].append(grads)
         avg_gradients_per_class = torch.stack([torch.stack(list(deque)).mean(0) if len(deque) > 0 else torch.zeros(1467610, device=self.device) for deque in self.gradients_per_class])
 
         weak_labels_list = []
@@ -98,12 +106,12 @@ class FixMatch_Distance:
         unsup_latent = latent_space.to(self.device)    
         avg_latent_space = torch.stack([torch.stack(list(deque)).mean(0) if len(deque) > 0 else torch.zeros(128, device=self.device) for deque in self.latent_space_per_class])
 
-        # cosine_similarities = F.cosine_similarity(unsup_latent[:, None, :], avg_latent_space[None, :, :],-1)
-        # label_idx = torch.argmax(cosine_similarities, dim=1)
+        cosine_similarities = F.cosine_similarity(unsup_latent[:, None, :], avg_latent_space[None, :, :],-1)
+        label_idx = torch.argmax(cosine_similarities, dim=1)
 
-        distancias = (unsup_latent[:, None, :] - avg_latent_space[None, :, :]) ** 2
-        distancias = torch.sqrt(distancias.sum(-1))
-        label_idx = torch.argmin(distancias, 1)
+        # distancias = (unsup_latent[:, None, :] - avg_latent_space[None, :, :]) ** 2
+        # distancias = torch.sqrt(distancias.sum(-1))
+        # label_idx = torch.argmin(distancias, 1)
         freqs = (label_idx == weak_labels.to(self.device)).float().mean()
         ix = freqs >= self.frequency_threshold
         strong_imgs = self.strong_augment(unsup_imgs).to(self.device)
