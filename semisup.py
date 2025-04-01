@@ -35,7 +35,7 @@ class FixMatch_DeepBilevel:
         #     self.gradients_per_class[sup_label.item()].append(grads) # test memory removed grads.to(self.device)
 
         sup_preds = self.model(self.weak_augment(sup_imgs))
-        losses = F.cross_entropy(sup_preds, sup_labels)
+        losses = F.cross_entropy(sup_preds, sup_labels, reduction='none')
         for label, loss in zip(sup_labels, losses):
             self.model.zero_grad()
             loss.backward(retain_graph=True)
@@ -49,7 +49,7 @@ class FixMatch_DeepBilevel:
         probs = weak_logits.softmax(1)
         weak_labels = probs.argmax(1)
         strong_imgs = self.strong_augment(unsup_imgs)
-        unsup_losses = F.cross_entropy(self.model(strong_imgs), weak_labels)
+        unsup_losses = F.cross_entropy(self.model(strong_imgs), weak_labels, reduction='none')
         for loss in unsup_losses:
             self.model.zero_grad()
             loss.backward(retain_graph=True)
