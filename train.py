@@ -7,6 +7,8 @@ parser.add_argument('--lmbda', type=float, default=1)
 parser.add_argument('--epochs', type=int, default=300)
 parser.add_argument('--sup-batchsize', type=int, default=16)
 parser.add_argument('--unsup-batchsize', type=int, default=112)
+parser.add_argument('--frequency_threshold', type=float, default=0.8)
+parser.add_argument('--type', type=str, default='cosine')
 args = parser.parse_args()
 
 import torchvision, torch
@@ -56,7 +58,8 @@ strong_augment = v2.Compose([
 ])
 
 method = getattr(semisup, args.method)
-method = method(model, weak_augment, strong_augment, marginal_distribution)
+method = method(model, weak_augment, strong_augment, marginal_distribution, args.frequency_threshold, args.type, device)
+print(f'Method: {args.method} - Frequency threshold: {args.frequency_threshold} - Type: {args.type}')
 
 class_centroids = torch.zeros(num_classes, 128, device=device)
 

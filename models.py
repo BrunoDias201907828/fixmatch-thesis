@@ -3,7 +3,7 @@
 import torch
 
 class BasicBlock(torch.nn.Module):
-    def __init__(self, in_planes, out_planes, stride, dropout_rate=0.3):
+    def __init__(self, in_planes, out_planes, stride, dropout_rate=0.0):
         super().__init__()
         self.bn1 = torch.nn.BatchNorm2d(in_planes)
         self.conv1 = torch.nn.Conv2d(in_planes, out_planes, kernel_size=3, stride=stride, padding=1, bias=False)

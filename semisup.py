@@ -15,25 +15,17 @@ class Supervised:
         return loss, 0
 
 class FixMatch_DeepBilevel:
-    def __init__(self, model, weak_augment, strong_augment, marginal_distribution, frequency_threshold=0.9):
+    def __init__(self, model, weak_augment, strong_augment, marginal_distribution, frequency_threshold=0.9, type='cosine'):
         self.model = model
         self.weak_augment = weak_augment
         self.strong_augment = strong_augment
         self.frequency_threshold = frequency_threshold
+        self.type = type
         self.num_classes = len(marginal_distribution)
         self.gradients_per_class = [deque(maxlen=10) for _ in range(self.num_classes)]
         self.device = next(model.parameters()).device
 
     def __call__(self, epoch, sup_imgs, sup_labels, unsup_imgs):
-        # sup_preds = self.model(self.weak_augment(sup_imgs))
-        # for sup_img, sup_label in zip(sup_imgs, sup_labels):
-        #     sup_img = sup_img[None,:]
-        #     sup_label = sup_label[None]
-        #     self.model.zero_grad()
-        #     F.cross_entropy(self.model(self.weak_augment(sup_img)), sup_label).backward()
-        #     grads = torch.cat([p.grad.view(-1) for p in self.model.parameters() if p.grad is not None])
-        #     self.gradients_per_class[sup_label.item()].append(grads) # test memory removed grads.to(self.device)
-
         sup_preds = self.model(self.weak_augment(sup_imgs))
         losses = F.cross_entropy(sup_preds, sup_labels, reduction='none')
         for label, loss in zip(sup_labels, losses):
@@ -57,24 +49,6 @@ class FixMatch_DeepBilevel:
             grads_unsup.append(grads.to(self.device))
         grads_unsup = torch.stack(grads_unsup)
 
-        # weak_labels_list = []
-        # grads_unsup = []
-        # weak_imgs = self.weak_augment(unsup_imgs).to(self.device)
-        # for weak_img in weak_imgs:
-        #     weak_img = weak_img[None,:]
-        #     self.model.zero_grad()
-        #     with torch.no_grad():
-        #         weak_logits = self.model(weak_img)
-        #     probs = weak_logits.softmax(1)
-        #     weak_label = probs.argmax(1)
-        #     weak_labels_list.append(weak_label.item())
-        #     strong_img = self.strong_augment(weak_img) # .to(self.device)
-        #     F.cross_entropy(self.model(strong_img), weak_label).backward()
-        #     grads = torch.cat([p.grad.view(-1) for p in self.model.parameters() if p.grad is not None])
-        #     grads_unsup.append(grads) # test memory removed grads.to(self.device)
-        # grads_unsup = torch.stack(grads_unsup)
-        # weak_labels = torch.tensor(weak_labels_list, device=self.device)
-
         cosine_similarities = F.cosine_similarity(grads_unsup[:, None, :], avg_gradients_per_class[None, :, :], -1)
         label_idx = torch.argmax(cosine_similarities, 1)
 
@@ -90,14 +64,16 @@ class FixMatch_DeepBilevel:
         return supervised_loss, unsupervised_loss
 
 class FixMatch_Distance:
-    def __init__(self, model, weak_augment, strong_augment, marginal_distribution, frequency_threshold=0.85):
+    def __init__(self, model, weak_augment, strong_augment, marginal_distribution, frequency_threshold=0.85, type='cosine', device='cuda'):
         self.model = model
         self.weak_augment = weak_augment
         self.strong_augment = strong_augment
         self.frequency_threshold = frequency_threshold
+        self.type = type
         self.num_classes = len(marginal_distribution)
         self.latent_space_per_class = [deque(maxlen=10) for _ in range(self.num_classes)]
-        self.device = next(model.parameters()).device
+        # self.device = next(model.parameters()).device
+        self.device = device
 
     def __call__(self, epoch, sup_imgs, sup_labels, unsup_imgs):
         latent_space = None
@@ -106,12 +82,12 @@ class FixMatch_Distance:
             latent_space = input[0].detach()
 
         hook = self.model.fc.register_forward_hook(extract_latent_space)
-        weak_sup = self.weak_augment(sup_imgs).to(self.device)
+        weak_sup = self.weak_augment(sup_imgs)
         sup_pred = self.model(weak_sup)
         for i in range(len(sup_imgs)):
             label = sup_labels[i].item()
             self.latent_space_per_class[label].append(latent_space[i].to(self.device))
-        weak_imgs = self.weak_augment(unsup_imgs).to(self.device)
+        weak_imgs = self.weak_augment(unsup_imgs)
         with torch.no_grad():
             weak_logits = self.model(weak_imgs)
         probs = weak_logits.softmax(1)
@@ -120,12 +96,15 @@ class FixMatch_Distance:
         unsup_latent = latent_space.to(self.device)    
         avg_latent_space = torch.stack([sum(deque) / len(deque) if len(deque) > 0 else torch.zeros(128, device=self.device) for deque in self.latent_space_per_class])
 
-        cosine_similarities = F.cosine_similarity(unsup_latent[:, None, :], avg_latent_space[None, :, :],-1)
-        label_idx = torch.argmax(cosine_similarities, dim=1)
-
-        # distancias = (unsup_latent[:, None, :] - avg_latent_space[None, :, :]) ** 2
-        # distancias = torch.sqrt(distancias.sum(-1))
-        # label_idx = torch.argmin(distancias, 1)
+        if self.type == 'cosine':
+            print(self.type)
+            cosine_similarities = F.cosine_similarity(unsup_latent[:, None, :], avg_latent_space[None, :, :],-1)
+            label_idx = torch.argmax(cosine_similarities, dim=1)
+        elif self.type == 'euclidean':
+            print(self.type)
+            distancias = (unsup_latent[:, None, :] - avg_latent_space[None, :, :]) ** 2
+            distancias = torch.sqrt(distancias.sum(-1))
+            label_idx = torch.argmin(distancias, 1)
         freqs = (label_idx == weak_labels.to(self.device)).float().mean()
         ix = freqs >= self.frequency_threshold
         strong_imgs = self.strong_augment(unsup_imgs).to(self.device)
