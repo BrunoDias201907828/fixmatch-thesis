@@ -15,7 +15,7 @@ class Supervised:
         return loss, 0
 
 class FixMatch_DeepBilevel:
-    def __init__(self, model, weak_augment, strong_augment, marginal_distribution, frequency_threshold=0.9, type='cosine'):
+    def __init__(self, model, weak_augment, strong_augment, marginal_distribution, frequency_threshold=0.9, type='cosine', confidence_threshold=0.95, mi_threshold = 0.20, mc_dropout_passes=30, device='cuda'):
         self.model = model
         self.weak_augment = weak_augment
         self.strong_augment = strong_augment
@@ -23,7 +23,7 @@ class FixMatch_DeepBilevel:
         self.type = type
         self.num_classes = len(marginal_distribution)
         self.gradients_per_class = [deque(maxlen=10) for _ in range(self.num_classes)]
-        self.device = next(model.parameters()).device
+        self.device = device
 
     def __call__(self, epoch, sup_imgs, sup_labels, unsup_imgs):
         sup_preds = self.model(self.weak_augment(sup_imgs))
@@ -64,7 +64,7 @@ class FixMatch_DeepBilevel:
         return supervised_loss, unsupervised_loss
 
 class FixMatch_Distance:
-    def __init__(self, model, weak_augment, strong_augment, marginal_distribution, frequency_threshold=0.85, type='cosine', device='cuda'):
+    def __init__(self, model, weak_augment, strong_augment, marginal_distribution, frequency_threshold=0.85, type='cosine', confidence_threshold=0.95, mi_threshold = 0.20, mc_dropout_passes=30, device='cuda'):
         self.model = model
         self.weak_augment = weak_augment
         self.strong_augment = strong_augment
@@ -113,19 +113,23 @@ class FixMatch_Distance:
         return supervised_loss, unsupervised_loss # can either use the weak labels and or the label_idx (from distances) as ground truth in the unsupervised loss
 
 class FixMatch_Mcdropout:
-    def __init__(self, model, weak_augment, strong_augment, marginal_distribution):
+    def __init__(self, model, weak_augment, strong_augment, marginal_distribution, frequency_threshold=0.85, type='cosine', confidence_threshold=0.95, mi_threshold = 0.20, mc_dropout_passes=30, device='cuda'):
         self.model = model
         self.weak_augment = weak_augment
         self.strong_augment = strong_augment
+        self.confidence_threshold = confidence_threshold
+        self.mi_threshold = mi_threshold
+        self.mc_dropout_passes = mc_dropout_passes
+        self.device = device
 
-    def __call__(self, epoch, sup_imgs, sup_labels, unsup_imgs, confidence=0.85, mc_dropout_passes=30):
+    def __call__(self, epoch, sup_imgs, sup_labels, unsup_imgs):
         weak_sup = self.weak_augment(sup_imgs)
         weak_imgs = self.weak_augment(unsup_imgs)
         sup_pred = self.model(weak_sup)
         was_training = self.model.training
         self.model.train()
         with torch.no_grad():
-            mc_logits = torch.stack([self.model(weak_imgs) for _ in range(mc_dropout_passes)])
+            mc_logits = torch.stack([self.model(weak_imgs) for _ in range(self.mc_dropout_passes)])
         if not was_training:
             self.model.eval()
         mc_probs = torch.softmax(mc_logits, 2)
@@ -133,7 +137,7 @@ class FixMatch_Mcdropout:
         mc_mean_probs = torch.mean(mc_probs, 0)
         # confidence threshold
         max_conf, weak_labels = mc_mean_probs.max(1)
-        conf_mask = max_conf >= confidence
+        conf_mask = max_conf >= self.confidence_threshold
         # mutual information
         eps = 1e-10
         H_avg = - (mc_mean_probs * torch.log(mc_mean_probs + eps)).sum(1)
@@ -142,7 +146,7 @@ class FixMatch_Mcdropout:
         mi = H_avg - mean_H
         normalized_mi = mi / torch.log(torch.tensor(mc_logits.size(2), dtype=mi.dtype))
         # selected pseudo-labels confidence threshold + mi 
-        mi_mask = normalized_mi < (1 - confidence)
+        mi_mask = normalized_mi < self.mi_threshold
         final_mask = conf_mask & mi_mask
         strong_imgs = self.strong_augment(unsup_imgs[final_mask])
         supervised_loss = F.cross_entropy(sup_pred, sup_labels)

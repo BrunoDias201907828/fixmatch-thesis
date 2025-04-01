@@ -9,6 +9,10 @@ parser.add_argument('--sup-batchsize', type=int, default=16)
 parser.add_argument('--unsup-batchsize', type=int, default=112)
 parser.add_argument('--frequency_threshold', type=float, default=0.8)
 parser.add_argument('--type', type=str, default='cosine')
+parser.add_argument('--confidence_threshold', type=float, default=0.95)
+parser.add_argument('--mi_threshold', type=float, default=0.20)
+parser.add_argument('--mc_dropout_passes', type=int, default=30)
+
 args = parser.parse_args()
 
 import torchvision, torch
@@ -58,8 +62,8 @@ strong_augment = v2.Compose([
 ])
 
 method = getattr(semisup, args.method)
-method = method(model, weak_augment, strong_augment, marginal_distribution, args.frequency_threshold, args.type, device)
-print(f'Method: {args.method} - Frequency threshold: {args.frequency_threshold} - Type: {args.type}')
+method = method(model, weak_augment, strong_augment, marginal_distribution, args.frequency_threshold, args.type, args.confidence_threshold, args.mi_threshold, args.mc_dropout_passes, device)
+print(f'Method: {args.method} - Frequency threshold: {args.frequency_threshold} - Type: {args.type} - Confidence threshold: {args.confidence_threshold} - MI threshold: {args.mi_threshold} - MC dropout passes: {args.mc_dropout_passes}')
 
 class_centroids = torch.zeros(num_classes, 128, device=device)
 
