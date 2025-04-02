@@ -4,7 +4,7 @@ import torch.nn.functional as F
 from collections import deque
 
 class Supervised:
-    def __init__(self, model, weak_augment, strong_augment, marginal_distribution):
+    def __init__(self, model, weak_augment, strong_augment, marginal_distribution, frequency_threshold=0.85, type='cosine', confidence_threshold=0.95, mi_threshold = 0.20, mc_dropout_passes=30, device='cuda'):
         self.model = model
         self.weak_augment = weak_augment
         
@@ -13,6 +13,55 @@ class Supervised:
         sup_pred = self.model(weak_sup)
         loss = F.cross_entropy(sup_pred, sup_labels)
         return loss, 0
+
+class FixMatch_new_multiple:
+    def __init__(self, model, weak_augment, strong_augment, marginal_distribution, frequency_threshold=0.85, type='cosine', confidence_threshold=0.95, mi_threshold = 0.20, mc_dropout_passes=30, device='cuda'):
+        self.model = model
+        self.weak_augment = weak_augment
+        self.strong_augment = strong_augment
+        self.type = type
+        self.confidence_threshold = confidence_threshold
+        self.num_classes = len(marginal_distribution)
+        self.latent_space_per_class = [deque(maxlen=10) for _ in range(self.num_classes)]
+        self.device = device
+
+    def __call__(self, epoch, sup_imgs, sup_labels, unsup_imgs):
+        latent_space = None
+        def extract_latent_space(module, input, output):
+            nonlocal latent_space
+            latent_space = input[0].detach()
+
+        hook = self.model.fc.register_forward_hook(extract_latent_space)
+        weak_sup = self.weak_augment(sup_imgs)
+        sup_pred = self.model(weak_sup)
+        for i in range(len(sup_imgs)):
+            label = sup_labels[i].item()
+            self.latent_space_per_class[label].append(latent_space[i].to(self.device))
+        weak_imgs = self.weak_augment(unsup_imgs)
+        with torch.no_grad():
+            weak_logits = self.model(weak_imgs)
+        probs = weak_logits.softmax(1)
+        max_probs, weak_labels = probs.max(1).to(self.device)
+        ix = max_probs >= self.confidence_threshold
+        hook.remove()
+        unsup_latent = latent_space.to(self.device)    
+        avg_latent_space = torch.stack([sum(deque) / len(deque) if len(deque) > 0 else torch.zeros(128, device=self.device) for deque in self.latent_space_per_class])
+
+        if self.type == 'cosine':
+            cosine_similarities = F.cosine_similarity(unsup_latent[:, None, :], avg_latent_space[None, :, :],-1)
+            label_idx = torch.argmax(cosine_similarities, dim=1)
+        elif self.type == 'euclidean':
+            distancias = (unsup_latent[:, None, :] - avg_latent_space[None, :, :]) ** 2
+            distancias = torch.sqrt(distancias.sum(-1))
+            label_idx = torch.argmin(distancias, 1)
+
+        mask = (weak_labels == label_idx)
+        final_mask = mask & ix   
+        strong_imgs = self.strong_augment(unsup_imgs[final_mask]).to(self.device)
+        supervised_loss = F.cross_entropy(sup_pred, sup_labels)
+        unsupervised_loss = F.cross_entropy(self.model(strong_imgs), weak_labels[final_mask]) if mask.sum() > 0 else 0
+        return supervised_loss, unsupervised_loss
+
 
 class FixMatch_New_method:
     def __init__(self, model, weak_augment, strong_augment, marginal_distribution, frequency_threshold=0.85, type='cosine', confidence_threshold=0.95, mi_threshold = 0.20, mc_dropout_passes=30, device='cuda'):
@@ -200,7 +249,7 @@ class FixMatch_Mcdropout:
 
 class FixMatch:
     # https://proceedings.neurips.cc/paper/2020/hash/06964dce9addb1c5cb5d6e3d9838f733-Abstract.html
-    def __init__(self, model, weak_augment, strong_augment, marginal_distribution):
+    def __init__(self, model, weak_augment, strong_augment, marginal_distribution, frequency_threshold=0.85, type='cosine', confidence_threshold=0.95, mi_threshold = 0.20, mc_dropout_passes=30, device='cuda'):
         self.model = model
         self.weak_augment = weak_augment
         self.strong_augment = strong_augment
