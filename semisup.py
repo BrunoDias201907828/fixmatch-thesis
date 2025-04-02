@@ -94,11 +94,11 @@ class FixMatch_DeepBilevel:
             # grads = torch.cat([p.grad.view(-1) for p in self.model.parameters() if p.grad is not None])
             grads_unsup.append(grads.to(self.device))
         grads_unsup = torch.stack(grads_unsup)
-        
-        if type == 'cosine':
+
+        if self.type == 'cosine':
             cosine_similarities = F.cosine_similarity(grads_unsup[:, None, :], avg_gradients_per_class[None, :, :], -1)
             label_idx = torch.argmax(cosine_similarities, 1)
-        elif type == 'euclidean':
+        elif self.type == 'euclidean':
             distancias = (grads_unsup[:, None, :] - avg_gradients_per_class[None, :, :]) ** 2
             distancias = torch.sqrt(distancias.sum(-1))
             label_idx = torch.argmin(distancias, 1)
