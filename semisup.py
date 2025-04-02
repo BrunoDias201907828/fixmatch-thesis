@@ -14,6 +14,51 @@ class Supervised:
         loss = F.cross_entropy(sup_pred, sup_labels)
         return loss, 0
 
+class FixMatch_New_method:
+    def __init__(self, model, weak_augment, strong_augment, marginal_distribution, frequency_threshold=0.85, type='cosine', confidence_threshold=0.95, mi_threshold = 0.20, mc_dropout_passes=30, device='cuda'):
+        self.model = model
+        self.weak_augment = weak_augment
+        self.strong_augment = strong_augment
+        self.type = type
+        self.num_classes = len(marginal_distribution)
+        self.latent_space_per_class = [deque(maxlen=10) for _ in range(self.num_classes)]
+        self.device = device
+
+    def __call__(self, epoch, sup_imgs, sup_labels, unsup_imgs):
+        latent_space = None
+        def extract_latent_space(module, input, output):
+            nonlocal latent_space
+            latent_space = input[0].detach()
+
+        hook = self.model.fc.register_forward_hook(extract_latent_space)
+        weak_sup = self.weak_augment(sup_imgs)
+        sup_pred = self.model(weak_sup)
+        for i in range(len(sup_imgs)):
+            label = sup_labels[i].item()
+            self.latent_space_per_class[label].append(latent_space[i].to(self.device))
+        weak_imgs = self.weak_augment(unsup_imgs)
+        with torch.no_grad():
+            weak_logits = self.model(weak_imgs)
+        probs = weak_logits.softmax(1)
+        weak_labels = probs.argmax(1).to(self.device)
+        hook.remove()
+        unsup_latent = latent_space.to(self.device)    
+        avg_latent_space = torch.stack([sum(deque) / len(deque) if len(deque) > 0 else torch.zeros(128, device=self.device) for deque in self.latent_space_per_class])
+
+        if self.type == 'cosine':
+            cosine_similarities = F.cosine_similarity(unsup_latent[:, None, :], avg_latent_space[None, :, :],-1)
+            label_idx = torch.argmax(cosine_similarities, dim=1)
+        elif self.type == 'euclidean':
+            distancias = (unsup_latent[:, None, :] - avg_latent_space[None, :, :]) ** 2
+            distancias = torch.sqrt(distancias.sum(-1))
+            label_idx = torch.argmin(distancias, 1)
+
+        mask = (weak_labels == label_idx)        
+        strong_imgs = self.strong_augment(unsup_imgs[mask]).to(self.device)
+        supervised_loss = F.cross_entropy(sup_pred, sup_labels)
+        unsupervised_loss = F.cross_entropy(self.model(strong_imgs), weak_labels[mask]) if mask.sum() > 0 else 0
+        return supervised_loss, unsupervised_loss
+
 class FixMatch_DeepBilevel:
     def __init__(self, model, weak_augment, strong_augment, marginal_distribution, frequency_threshold=0.9, type='cosine', confidence_threshold=0.95, mi_threshold = 0.20, mc_dropout_passes=30, device='cuda'):
         self.model = model
@@ -30,11 +75,11 @@ class FixMatch_DeepBilevel:
         losses = F.cross_entropy(sup_preds, sup_labels, reduction='none')
         for label, loss in zip(sup_labels, losses):
             self.model.zero_grad()
-            loss.backward(retain_graph=True)
-            grads = torch.cat([p.grad.view(-1) for p in self.model.parameters() if p.grad is not None])
+            grads = torch.cat([g.view(-1) for g in torch.autograd.grad(loss, self.model.layer3.parameters(), retain_graph=True) if g is not None])
+            # loss.backward(retain_graph=True)
+            # grads = torch.cat([p.grad.view(-1) for p in self.model.parameters() if p.grad is not None])
             self.gradients_per_class[label.item()].append(grads)
-        avg_gradients_per_class = torch.stack([sum(deque) / len(deque) if len(deque) > 0 else torch.zeros(1467610, device=self.device) for deque in self.gradients_per_class])
-
+        avg_gradients_per_class = torch.stack([sum(deque) / len(deque) if len(deque) > 0 else torch.zeros(1116032, device=self.device) for deque in self.gradients_per_class]) # gradient size: model: 1467610; layer3: 1116032;
         grads_unsup = []
         with torch.no_grad():
             weak_logits = self.model(self.weak_augment(unsup_imgs))
@@ -44,17 +89,19 @@ class FixMatch_DeepBilevel:
         unsup_losses = F.cross_entropy(self.model(strong_imgs), weak_labels, reduction='none')
         for loss in unsup_losses:
             self.model.zero_grad()
-            loss.backward(retain_graph=True)
-            grads = torch.cat([p.grad.view(-1) for p in self.model.parameters() if p.grad is not None])
+            grads = torch.cat([g.view(-1) for g in torch.autograd.grad(loss, self.model.layer3.parameters(), retain_graph=True) if g is not None])
+            # loss.backward(retain_graph=True)
+            # grads = torch.cat([p.grad.view(-1) for p in self.model.parameters() if p.grad is not None])
             grads_unsup.append(grads.to(self.device))
         grads_unsup = torch.stack(grads_unsup)
-
-        cosine_similarities = F.cosine_similarity(grads_unsup[:, None, :], avg_gradients_per_class[None, :, :], -1)
-        label_idx = torch.argmax(cosine_similarities, 1)
-
-        # distancias = (grads_unsup[:, None, :] - avg_gradients_per_class[None, :, :]) ** 2
-        # distancias = torch.sqrt(distancias.sum(-1))
-        # label_idx = torch.argmin(distancias, 1)
+        
+        if type == 'cosine':
+            cosine_similarities = F.cosine_similarity(grads_unsup[:, None, :], avg_gradients_per_class[None, :, :], -1)
+            label_idx = torch.argmax(cosine_similarities, 1)
+        elif type == 'euclidean':
+            distancias = (grads_unsup[:, None, :] - avg_gradients_per_class[None, :, :]) ** 2
+            distancias = torch.sqrt(distancias.sum(-1))
+            label_idx = torch.argmin(distancias, 1)
 
         freqs = (label_idx == weak_labels).float().mean()
         ix = freqs >= self.frequency_threshold
@@ -97,11 +144,9 @@ class FixMatch_Distance:
         avg_latent_space = torch.stack([sum(deque) / len(deque) if len(deque) > 0 else torch.zeros(128, device=self.device) for deque in self.latent_space_per_class])
 
         if self.type == 'cosine':
-            print(self.type)
             cosine_similarities = F.cosine_similarity(unsup_latent[:, None, :], avg_latent_space[None, :, :],-1)
             label_idx = torch.argmax(cosine_similarities, dim=1)
         elif self.type == 'euclidean':
-            print(self.type)
             distancias = (unsup_latent[:, None, :] - avg_latent_space[None, :, :]) ** 2
             distancias = torch.sqrt(distancias.sum(-1))
             label_idx = torch.argmin(distancias, 1)
