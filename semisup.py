@@ -63,7 +63,7 @@ class FixMatch_new_multiple:
         return supervised_loss, unsupervised_loss
 
 
-class FixMatch_New_method:
+class FixMatch_new_method:
     def __init__(self, model, weak_augment, strong_augment, marginal_distribution, frequency_threshold=0.85, type='cosine', confidence_threshold=0.95, mi_threshold = 0.20, mc_dropout_passes=30, device='cuda'):
         self.model = model
         self.weak_augment = weak_augment
@@ -168,7 +168,6 @@ class FixMatch_Distance:
         self.type = type
         self.num_classes = len(marginal_distribution)
         self.latent_space_per_class = [deque(maxlen=10) for _ in range(self.num_classes)]
-        # self.device = next(model.parameters()).device
         self.device = device
 
     def __call__(self, epoch, sup_imgs, sup_labels, unsup_imgs):
@@ -204,7 +203,7 @@ class FixMatch_Distance:
         strong_imgs = self.strong_augment(unsup_imgs).to(self.device)
         supervised_loss = F.cross_entropy(sup_pred, sup_labels.to(self.device))
         unsupervised_loss = F.cross_entropy(self.model(strong_imgs), weak_labels) if ix == True else 0
-        return supervised_loss, unsupervised_loss # can either use the weak labels and or the label_idx (from distances) as ground truth in the unsupervised loss
+        return supervised_loss, unsupervised_loss
 
 class FixMatch_Mcdropout:
     def __init__(self, model, weak_augment, strong_augment, marginal_distribution, frequency_threshold=0.85, type='cosine', confidence_threshold=0.95, mi_threshold = 0.20, mc_dropout_passes=30, device='cuda'):

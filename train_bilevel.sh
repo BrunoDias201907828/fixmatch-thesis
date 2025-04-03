@@ -1,6 +1,6 @@
 #!/bin/bash
 
-METHOD="FixMatch_Distance"
+METHOD="FixMatch_DeepBilevel"
 FREQUENCY_THRESHOLDS="0.7 0.75 0.8 0.85 0.9 0.95"
 TYPES="cosine euclidean"
 

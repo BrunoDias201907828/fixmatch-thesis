@@ -86,11 +86,9 @@ for epoch in range(args.epochs):
     unsup_dataloader_iter = cycle(train_unsup_dataloader) if len(train_unsup_dataloader) < len(train_sup_dataloader) else iter(train_unsup_dataloader)
 
     for (sup_imgs, sup_labels), (unsup_imgs, _) in zip(sup_dataloader_iter, unsup_dataloader_iter):
-        sup_imgs, sup_labels = next(sup_dataloader_iter)
-        unsup_imgs = next(unsup_dataloader_iter)
         sup_imgs = sup_imgs.to(device)
         sup_labels = sup_labels.to(device)
-        unsup_imgs = unsup_imgs[0].to(device)
+        unsup_imgs = unsup_imgs.to(device)
         sup_loss, unsup_loss = method(epoch, sup_imgs, sup_labels, unsup_imgs)
 
         total_loss = sup_loss + args.lmbda*unsup_loss
