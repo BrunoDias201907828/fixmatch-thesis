@@ -41,7 +41,7 @@ class FixMatch_new_multiple:
         with torch.no_grad():
             weak_logits = self.model(weak_imgs)
         probs = weak_logits.softmax(1)
-        max_probs, weak_labels = probs.max(1).to(self.device)
+        max_probs, weak_labels = probs.max(1)
         ix = max_probs >= self.confidence_threshold
         hook.remove()
         unsup_latent = latent_space.to(self.device)    
