@@ -76,8 +76,6 @@ def average_centroids(labels, latent_space, momentum=0.999):
 ema_model = torch.optim.swa_utils.AveragedModel(model, multi_avg_fn=torch.optim.swa_utils.get_ema_multi_avg_fn(0.999))
 optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4, weight_decay=5e-4)
 
-scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs)
-
 for epoch in range(args.epochs):
     # train
     tic = time()
@@ -115,8 +113,6 @@ for epoch in range(args.epochs):
         outputs = eval_model(inputs)
         acc.update(outputs, targets)
     print(f'Test  - Epoch {epoch+1}/{args.epochs} - Accuracy: {acc.compute().item()}')
-
-    scheduler.step()
 
 torch.optim.swa_utils.update_bn(train_sup_dataloader, ema_model, device)
 model = model if args.method == 'Supervised' else ema_model.module
