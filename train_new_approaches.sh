@@ -8,6 +8,6 @@ for CONFIDENCE_THRESHOLD in $CONFIDENCE_THRESHOLDS; do
     for TYPE in $TYPES; do
         OUTPUT_FILE="${METHOD}-${CONFIDENCE_THRESHOLD}-${TYPE}.txt"
         echo "Running $METHOD with confidence_threshold=$CONFIDENCE_THRESHOLD and type=$TYPE"
-        python train.py model-$METHOD.pth $METHOD --confidence_threshold $CONFIDENCE_THRESHOLD --type $TYPE > $OUTPUT_FILE
+        python new_train.py model-$METHOD-$CONFIDENCE_THRESHOLD-$TYPE.pth $METHOD --confidence_threshold $CONFIDENCE_THRESHOLD --type $TYPE > $OUTPUT_FILE
     done
 done

@@ -114,7 +114,7 @@ def train_on_fold(train_subset, val_subset):
             best_val_acc = val_acc_value
             best_model_state = ema_model.module.state_dict() if hasattr(ema_model, 'module') else ema_model.state_dict()
 
-    if args.method == 'Supervised'
+    if args.method == 'Supervised':
         torch.optim.swa_utils.update_bn(train_sup_dataloader, ema_model, device)
     else:
         combined_dataset = torch.utils.data.ConcatDataset([train_sup_dataset, train_unsup_dataset])
