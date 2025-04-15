@@ -56,10 +56,14 @@ class FixMatch_new_multiple:
             label_idx = torch.argmin(distancias, 1)
 
         mask = (weak_labels == label_idx)
-        final_mask = mask & ix   
-        strong_imgs = self.strong_augment(unsup_imgs[final_mask]).to(self.device)
+        final_mask = mask & ix
+        if final_mask.sum() > 0:
+            strong_imgs = self.strong_augment(unsup_imgs[final_mask])
+            strong_pred = self.model(strong_imgs)
+            unsupervised_loss = F.cross_entropy(strong_pred, weak_labels[final_mask])
+        else:
+            unsupervised_loss = torch.tensor(0.0, device=self.device)
         supervised_loss = F.cross_entropy(sup_pred, sup_labels)
-        unsupervised_loss = F.cross_entropy(self.model(strong_imgs), weak_labels[final_mask]) if mask.sum() > 0 else 0
         return supervised_loss, unsupervised_loss
 
 
@@ -102,10 +106,14 @@ class FixMatch_new_method:
             distancias = torch.sqrt(distancias.sum(-1))
             label_idx = torch.argmin(distancias, 1)
 
-        mask = (weak_labels == label_idx)        
-        strong_imgs = self.strong_augment(unsup_imgs[mask]).to(self.device)
+        mask = (weak_labels == label_idx)
+        if mask.sum() > 0:
+            strong_imgs = self.strong_augment(unsup_imgs[mask])
+            strong_pred = self.model(strong_imgs)
+            unsupervised_loss = F.cross_entropy(strong_pred, weak_labels[mask])
+        else:
+            unsupervised_loss = torch.tensor(0.0, device=self.device)
         supervised_loss = F.cross_entropy(sup_pred, sup_labels)
-        unsupervised_loss = F.cross_entropy(self.model(strong_imgs), weak_labels[mask]) if mask.sum() > 0 else 0
         return supervised_loss, unsupervised_loss
 
 class FixMatch_DeepBilevel:
@@ -156,7 +164,7 @@ class FixMatch_DeepBilevel:
         ix = freqs >= self.frequency_threshold
         strong_imgs = self.strong_augment(unsup_imgs)
         supervised_loss = F.cross_entropy(sup_preds, sup_labels)
-        unsupervised_loss = F.cross_entropy(self.model(strong_imgs), weak_labels) if ix == True else 0
+        unsupervised_loss = F.cross_entropy(self.model(strong_imgs), weak_labels) if ix == True else torch.tensor(0.0, device=self.device)
         return supervised_loss, unsupervised_loss
 
 class FixMatch_Distance:
@@ -202,7 +210,7 @@ class FixMatch_Distance:
         ix = freqs >= self.frequency_threshold
         strong_imgs = self.strong_augment(unsup_imgs).to(self.device)
         supervised_loss = F.cross_entropy(sup_pred, sup_labels.to(self.device))
-        unsupervised_loss = F.cross_entropy(self.model(strong_imgs), weak_labels) if ix == True else 0
+        unsupervised_loss = F.cross_entropy(self.model(strong_imgs), weak_labels) if ix == True else torch.tensor(0.0, device=self.device)
         return supervised_loss, unsupervised_loss
 
 class FixMatch_Mcdropout:
@@ -241,9 +249,15 @@ class FixMatch_Mcdropout:
         # selected pseudo-labels confidence threshold + mi 
         mi_mask = normalized_mi < self.mi_threshold
         final_mask = conf_mask & mi_mask
+
+        if final_mask.sum() > 0:
+            strong_imgs = self.strong_augment(unsup_imgs[final_mask])
+            strong_pred = self.model(strong_imgs)
+            unsupervised_loss = F.cross_entropy(strong_pred, weak_labels[final_mask])
+        else:
+            unsupervised_loss = torch.tensor(0.0, device=self.device)        
         strong_imgs = self.strong_augment(unsup_imgs[final_mask])
         supervised_loss = F.cross_entropy(sup_pred, sup_labels)
-        unsupervised_loss = F.cross_entropy(self.model(strong_imgs), weak_labels[final_mask]) if final_mask.sum() > 0 else 0
         return supervised_loss, unsupervised_loss
 
 class FixMatch:
@@ -252,6 +266,7 @@ class FixMatch:
         self.model = model
         self.weak_augment = weak_augment
         self.strong_augment = strong_augment
+        self.device = device
 
     def __call__(self, epoch, sup_imgs, sup_labels, unsup_imgs, confidence=0.95):
         weak_sup = self.weak_augment(sup_imgs)
@@ -262,10 +277,13 @@ class FixMatch:
         weak_probs = weak_logits.softmax(1)
         max_probs, weak_labels = weak_probs.max(1)
         ix = max_probs >= confidence
-        strong_imgs = self.strong_augment(unsup_imgs[ix])
-        strong_pred = self.model(strong_imgs)
+        if ix.sum() > 0:
+            strong_imgs = self.strong_augment(unsup_imgs[ix])
+            strong_pred = self.model(strong_imgs)
+            unsupervised_loss = F.cross_entropy(strong_pred, weak_labels[ix])
+        else:
+            unsupervised_loss = torch.tensor(0.0, device=self.device)
         supervised_loss = F.cross_entropy(sup_pred, sup_labels)
-        unsupervised_loss = F.cross_entropy(strong_pred, weak_labels[ix]) if ix.sum() > 0 else 0
         return supervised_loss, unsupervised_loss
 
 class MixMatch:

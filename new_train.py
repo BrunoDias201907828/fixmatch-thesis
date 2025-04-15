@@ -31,7 +31,6 @@ device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
 # Data preparation
 SEED = 123
-# generator = torch.Generator().manual_seed(SEED)
 transforms = v2.Compose([
     v2.ToImage(),
     v2.ToDtype(torch.float32, True),
@@ -48,7 +47,6 @@ y = np.array(train_dataset.targets)
 skf = StratifiedKFold(n_splits=5, shuffle=True, random_state=SEED)
 
 def train_on_fold(train_subset, val_subset):
-    # train_sup_dataset, train_unsup_dataset = torch.utils.data.random_split(train_subset, [args.num_labeled, len(train_subset) - args.num_labeled], generator)
     targets = np.array(train_subset.dataset.targets)[train_subset.indices]
     sup_indices, unsup_indices = train_test_split(
         np.arange(len(train_subset)),
@@ -116,12 +114,12 @@ def train_on_fold(train_subset, val_subset):
             best_val_acc = val_acc_value
             best_model_state = ema_model.module.state_dict() if hasattr(ema_model, 'module') else ema_model.state_dict()
 
-
-    # torch.optim.swa_utils.update_bn(train_sup_dataloader, ema_model, device)
-    combined_dataset = torch.utils.data.ConcatDataset([train_sup_dataset, train_unsup_dataset])
-    combined_dataloader = torch.utils.data.DataLoader(combined_dataset, batch_size=args.sup_batchsize, shuffle=True, num_workers=4, pin_memory=True)
-    torch.optim.swa_utils.update_bn(combined_dataloader, ema_model, device)
-
+    if args.method == 'Supervised'
+        torch.optim.swa_utils.update_bn(train_sup_dataloader, ema_model, device)
+    else:
+        combined_dataset = torch.utils.data.ConcatDataset([train_sup_dataset, train_unsup_dataset])
+        combined_dataloader = torch.utils.data.DataLoader(combined_dataset, batch_size=args.sup_batchsize, shuffle=True, num_workers=4, pin_memory=True)
+        torch.optim.swa_utils.update_bn(combined_dataloader, ema_model, device)
  
     return best_model_state
 
