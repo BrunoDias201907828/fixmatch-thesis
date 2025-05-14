@@ -8,6 +8,9 @@ from sklearn.model_selection import StratifiedKFold
 import numpy as np
 import semisup, models
 from sklearn.model_selection import train_test_split
+from collections import deque
+import random
+
 
 # Argument parsing
 parser = argparse.ArgumentParser()
@@ -31,6 +34,13 @@ device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
 # Data preparation
 SEED = 123
+
+torch.manual_seed(SEED)
+torch.cuda.manual_seed_all(SEED)
+np.random.seed(SEED)
+random.seed(SEED)
+
+
 transforms = v2.Compose([
     v2.ToImage(),
     v2.ToDtype(torch.float32, True),
@@ -56,6 +66,7 @@ def train_on_fold(train_subset, val_subset):
     )
     train_sup_dataset = torch.utils.data.Subset(train_subset, sup_indices)
     train_unsup_dataset = torch.utils.data.Subset(train_subset, unsup_indices)
+    marginal_distribution = torch.bincount(torch.tensor([y for _, y in train_sup_dataset]), minlength=num_classes).to(device) / len(train_sup_dataset)
     train_sup_dataloader = torch.utils.data.DataLoader(train_sup_dataset, args.sup_batchsize, shuffle=True, num_workers=4, pin_memory=True)
     train_unsup_dataloader = torch.utils.data.DataLoader(train_unsup_dataset, args.unsup_batchsize, shuffle=True, num_workers=4, pin_memory=True)
     val_dataloader = torch.utils.data.DataLoader(val_subset, 100, shuffle=True, num_workers=4, pin_memory=True)
@@ -64,8 +75,10 @@ def train_on_fold(train_subset, val_subset):
     model = models.WideResNet()
     model.to(device)
     weak_augment = v2.Compose([v2.RandomCrop(32, 4, padding_mode='reflect'), v2.RandomHorizontalFlip()])
-    strong_augment = v2.Compose([v2.RandomCrop(32, 4, padding_mode='reflect'), v2.RandomHorizontalFlip(), v2.RandAugment()])
-    method = getattr(semisup, args.method)(model, weak_augment, strong_augment, None, args.frequency_threshold, args.type, args.confidence_threshold, args.mi_threshold, args.mc_dropout_passes, device)
+    # strong_augment = v2.Compose([v2.RandomCrop(32, 4, padding_mode='reflect'), v2.RandomHorizontalFlip(), v2.RandAugment()])
+    strong_augment = v2.Compose([v2.RandAugment()])
+
+    method = getattr(semisup, args.method)(model, weak_augment, strong_augment, marginal_distribution, args.frequency_threshold, args.type, args.confidence_threshold, args.mi_threshold, args.mc_dropout_passes, device)
 
     best_val_acc = 0
     best_model_state = None
@@ -113,13 +126,15 @@ def train_on_fold(train_subset, val_subset):
         if val_acc_value > best_val_acc:
             best_val_acc = val_acc_value
             best_model_state = ema_model.module.state_dict() if hasattr(ema_model, 'module') else ema_model.state_dict()
+    print("Best Validation Accuracy: ", best_val_acc)
 
     if args.method == 'Supervised':
+        loader = torch.utils.data.DataLoader(train_sup_dataset, batch_size=args.sup_batchsize, shuffle=False, num_workers=4, pin_memory=True)
         torch.optim.swa_utils.update_bn(train_sup_dataloader, ema_model, device)
     else:
-        combined_dataset = torch.utils.data.ConcatDataset([train_sup_dataset, train_unsup_dataset])
-        combined_dataloader = torch.utils.data.DataLoader(combined_dataset, batch_size=args.sup_batchsize, shuffle=True, num_workers=4, pin_memory=True)
-        torch.optim.swa_utils.update_bn(combined_dataloader, ema_model, device)
+        combined = torch.utils.data.ConcatDataset([train_sup_dataset, train_unsup_dataset])
+        loader = torch.utils.data.DataLoader(combined, batch_size=args.sup_batchsize, shuffle=False, num_workers=4, pin_memory=True)
+        torch.optim.swa_utils.update_bn(loader, ema_model, device)
  
     return best_model_state
 
