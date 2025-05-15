@@ -130,11 +130,10 @@ def train_on_fold(train_subset, val_subset):
 
     if args.method == 'Supervised':
         loader = torch.utils.data.DataLoader(train_sup_dataset, batch_size=args.sup_batchsize, shuffle=False, num_workers=4, pin_memory=True)
-        torch.optim.swa_utils.update_bn(train_sup_dataloader, ema_model, device)
     else:
         combined = torch.utils.data.ConcatDataset([train_sup_dataset, train_unsup_dataset])
         loader = torch.utils.data.DataLoader(combined, batch_size=args.sup_batchsize, shuffle=False, num_workers=4, pin_memory=True)
-        torch.optim.swa_utils.update_bn(loader, ema_model, device)
+    torch.optim.swa_utils.update_bn(loader, ema_model, device)
  
     return best_model_state
 
