@@ -1,0 +1,166 @@
+import argparse
+import torchvision, torch
+from torchvision.transforms import v2
+from torcheval import metrics
+from itertools import cycle
+from time import time
+import numpy as np
+import semisup, models
+from sklearn.model_selection import train_test_split
+from collections import deque
+import random
+
+
+# Argument parsing
+parser = argparse.ArgumentParser()
+parser.add_argument('output')
+parser.add_argument('method')
+parser.add_argument('--num-labeled', type=int, default=250)
+parser.add_argument('--lmbda', type=float, default=1)
+parser.add_argument('--epochs', type=int, default=400)
+parser.add_argument('--sup-batchsize', type=int, default=1)
+parser.add_argument('--unsup-batchsize', type=int, default=1)
+parser.add_argument('--frequency_threshold', type=float, default=0.8)
+parser.add_argument('--type', type=str, default='cosine')
+parser.add_argument('--confidence_threshold', type=float, default=0.95)
+parser.add_argument('--mi_threshold', type=float, default=0.20)
+parser.add_argument('--mc_dropout_passes', type=int, default=30)
+parser.add_argument('--val_split', type=float, default=0.1, help='Validation split ratio')
+
+args = parser.parse_args()
+
+# Device configuration
+device = 'cuda' if torch.cuda.is_available() else 'cpu'
+
+# Data preparation
+SEED = 123
+
+torch.manual_seed(SEED)
+torch.cuda.manual_seed_all(SEED)
+np.random.seed(SEED)
+random.seed(SEED)
+
+
+transforms = v2.Compose([
+    v2.ToImage(),
+    v2.ToDtype(torch.float32, True),
+    v2.Normalize((0.49139968, 0.48215827, 0.44653124), (0.24703233, 0.24348505, 0.26158768))
+])
+num_classes = 10
+train_dataset = torchvision.datasets.CIFAR10('../data', True, transforms)
+test_dataset = torchvision.datasets.CIFAR10('../data', False, transforms)
+test_dataloader = torch.utils.data.DataLoader(test_dataset, 100,
+    pin_memory=True, num_workers=4)
+
+# Train/Validation split
+y = np.array(train_dataset.targets)
+train_idx, val_idx = train_test_split(np.arange(len(train_dataset)),
+                                      test_size=args.val_split,
+                                      stratify=y,
+                                      random_state=SEED)
+
+train_subset = torch.utils.data.Subset(train_dataset, train_idx)
+val_subset = torch.utils.data.Subset(train_dataset, val_idx)
+
+
+def train_model(train_subset, val_subset):
+    targets = np.array(train_subset.dataset.targets)[train_subset.indices]
+    sup_indices, unsup_indices = train_test_split(
+        np.arange(len(train_subset)),
+        train_size=args.num_labeled,
+        stratify=targets,
+        random_state=SEED
+    )
+    train_sup_dataset = torch.utils.data.Subset(train_subset, sup_indices)
+    train_unsup_dataset = torch.utils.data.Subset(train_subset, unsup_indices)
+    marginal_distribution = torch.bincount(torch.tensor([y for _, y in train_sup_dataset]), minlength=num_classes).to(device) / len(train_sup_dataset)
+    train_sup_dataloader = torch.utils.data.DataLoader(train_sup_dataset, args.sup_batchsize, shuffle=True, num_workers=4, pin_memory=True)
+    train_unsup_dataloader = torch.utils.data.DataLoader(train_unsup_dataset, args.unsup_batchsize, shuffle=True, num_workers=4, pin_memory=True)
+    val_dataloader = torch.utils.data.DataLoader(val_subset, 100, shuffle=False, num_workers=4, pin_memory=True)
+
+    # Initialize model and method
+    model = models.WideResNet()
+    model.to(device)
+    weak_augment = v2.Compose([v2.RandomCrop(32, 4, padding_mode='reflect'), v2.RandomHorizontalFlip()])
+    strong_augment = v2.Compose([v2.RandomCrop(32, 4, padding_mode='reflect'), v2.RandomHorizontalFlip(), v2.RandAugment()])
+
+    method = getattr(semisup, args.method)(model, weak_augment, strong_augment, marginal_distribution, args.frequency_threshold, args.type, args.confidence_threshold, args.mi_threshold, args.mc_dropout_passes, device)
+
+    best_val_acc = 0
+    best_model_state = None
+
+    ema_model = torch.optim.swa_utils.AveragedModel(model, multi_avg_fn=torch.optim.swa_utils.get_ema_multi_avg_fn(0.999))
+    optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4, weight_decay=5e-4)
+
+    # Training loop
+    for epoch in range(args.epochs):
+        tic = time()
+        model.train()
+        avg_sup_loss = avg_unsup_loss = 0.0
+        semisup_n_iter = max(len(train_sup_dataloader), len(train_unsup_dataloader))
+        sup_dataloader_iter = cycle(train_sup_dataloader) if len(train_sup_dataloader) < len(train_unsup_dataloader) else iter(train_sup_dataloader)
+        unsup_dataloader_iter = cycle(train_unsup_dataloader) if len(train_unsup_dataloader) < len(train_sup_dataloader) else iter(train_unsup_dataloader)
+
+        for (sup_imgs, sup_labels), (unsup_imgs, _) in zip(sup_dataloader_iter, unsup_dataloader_iter):
+            sup_imgs, sup_labels, unsup_imgs = sup_imgs.to(device), sup_labels.to(device), unsup_imgs.to(device)
+            sup_loss, unsup_loss = method(epoch, sup_imgs, sup_labels, unsup_imgs)
+            total_loss = sup_loss + args.lmbda * unsup_loss
+            optimizer.zero_grad()
+            total_loss.backward()
+            optimizer.step()
+            if ema_model:
+                ema_model.update_parameters(model)
+
+            avg_sup_loss += float(sup_loss) / semisup_n_iter
+            avg_unsup_loss += float(unsup_loss) / semisup_n_iter
+
+        toc = time()
+        print(f'Train - Epoch {epoch+1}/{args.epochs} - {toc-tic:.1f}s - Avg sup loss: {avg_sup_loss:.4f} - Avg unsup loss: {avg_unsup_loss:.4f}')
+
+        # Validation
+        eval_model = model if args.method == 'Supervised' else ema_model
+        eval_model.eval()
+        val_acc = metrics.MulticlassAccuracy(device=device)
+        with torch.no_grad():
+            for inputs, targets in val_dataloader:
+                inputs, targets = inputs.to(device), targets.to(device)
+                outputs = eval_model(inputs)
+                val_acc.update(outputs, targets)
+        val_acc_value = val_acc.compute().item()
+        print(f'Validation - Epoch {epoch + 1}/{args.epochs} - Val_Accuracy: {val_acc_value:.4f}')
+
+        if val_acc_value > best_val_acc:
+            best_val_acc = val_acc_value
+            best_model_state = ema_model.module.state_dict() if hasattr(ema_model, 'module') else ema_model.state_dict()
+    print("Best Validation Accuracy: ", best_val_acc)
+
+    # Update BN statistics with full training data
+    if args.method == 'Supervised':
+        loader = torch.utils.data.DataLoader(train_sup_dataset, batch_size=args.sup_batchsize, shuffle=False, num_workers=4, pin_memory=True)
+    else:
+        combined = torch.utils.data.ConcatDataset([train_sup_dataset, train_unsup_dataset])
+        loader = torch.utils.data.DataLoader(combined, batch_size=args.sup_batchsize, shuffle=False, num_workers=4, pin_memory=True)
+    torch.optim.swa_utils.update_bn(loader, ema_model, device)
+
+    return best_model_state
+
+
+best_model_state = train_model(train_subset, val_subset)
+
+# Evaluate on test set
+model = models.WideResNet()
+model.load_state_dict(best_model_state)
+model.to(device)
+model.eval()
+acc = metrics.MulticlassAccuracy(device=device)
+with torch.no_grad():
+    for inputs, targets in test_dataloader:
+        inputs, targets = inputs.to(device), targets.to(device)
+        outputs = model(inputs)
+        acc.update(outputs, targets)
+
+test_acc_value = acc.compute().item()
+print(f'Test Accuracy: {test_acc_value}')
+
+torch.save(best_model_state, args.output)
+print(f'Model saved to {args.output}')
